@@ -76,6 +76,16 @@ function localDateInputValue() {
   return new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10)
 }
 
+function eventFromDatabase(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    location: row.location || '',
+    date: row.event_date || '',
+    active: row.active === true
+  }
+}
+
 function csvCell(value) {
   let text = String(value ?? '')
   if (/^[\u0000-\u0020]*[=+\-@]/.test(text)) text = `'${text}`
@@ -139,6 +149,7 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal, a
   const [attendanceToDelete, setAttendanceToDelete] = useState(null)
   const [eventToDelete, setEventToDelete] = useState(null)
   const [deleteBusy, setDeleteBusy] = useState(false)
+  const [eventSaving, setEventSaving] = useState(false)
 
   // Attendance
   const [attLog, setAttLog] = useState(() => (useDemo ? DEMO_ATTENDANCE : []))
@@ -149,9 +160,9 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal, a
   const [contribSearch, setContribSearch] = useState('')
   const [contribTargetId, setContribTargetId] = useState('')
 
-  // Event details stay on this device; each attendance row stores its event name in the existing notes column.
-  const [events, setEvents] = useState(() => readLocalEvents())
-  const [activeEventId, setActiveEventId] = useState(() => readLocalEvents().find((event) => event.active)?.id || '')
+  // Live events are loaded from Supabase; demo events stay local to the browser.
+  const [events, setEvents] = useState(() => (useDemo ? readLocalEvents() : []))
+  const [activeEventId, setActiveEventId] = useState(() => (useDemo ? readLocalEvents().find((event) => event.active)?.id || '' : ''))
   const [showEventForm, setShowEventForm] = useState(false)
   const [eventForm, setEventForm] = useState({ name: '', location: '', date: localDateInputValue() })
   const activeEvent = events.find((event) => event.id === activeEventId && event.active) || events.find((event) => event.active) || null
@@ -232,6 +243,91 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal, a
     }
   }, [tab, loadAttendance])
 
+  const loadEvents = useCallback(async () => {
+    if (useDemo) {
+      const localEvents = readLocalEvents()
+      setEvents(localEvents)
+      setActiveEventId(localEvents.find((event) => event.active)?.id || '')
+      return
+    }
+
+    const { data, error } = await supabase
+      .from('events')
+      .select('id, name, location, event_date, active, created_at')
+      .order('created_at', { ascending: false })
+      .limit(100)
+
+    if (error) {
+      notify.error(`Could not load events: ${error.message}`)
+      return
+    }
+
+    let rows = data || []
+    // Preserve event setups made on this device before event sync was added.
+    if (rows.length === 0) {
+      const localEvents = readLocalEvents()
+      if (localEvents.length) {
+        const legacyRows = localEvents.map((event) => ({
+          ...(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(event.id) ? { id: event.id } : {}),
+          name: event.name,
+          location: event.location || '',
+          event_date: /^\d{4}-\d{2}-\d{2}$/.test(event.date) ? event.date : null,
+          active: event.active === true
+        }))
+        const { error: syncError } = await supabase
+          .from('events')
+          .upsert(legacyRows, { onConflict: 'id', ignoreDuplicates: true })
+        if (syncError) {
+          notify.warn(`Could not sync events saved on this device: ${syncError.message}`)
+        } else {
+          const { data: syncedRows, error: reloadError } = await supabase
+            .from('events')
+            .select('id, name, location, event_date, active, created_at')
+            .order('created_at', { ascending: false })
+            .limit(100)
+          if (reloadError) {
+            notify.error(`Could not reload synced events: ${reloadError.message}`)
+          } else {
+            rows = syncedRows || []
+          }
+        }
+      }
+    }
+
+    const nextEvents = rows.map(eventFromDatabase)
+    setEvents(nextEvents)
+    setActiveEventId(nextEvents.find((event) => event.active)?.id || '')
+  }, [useDemo, notify])
+
+  useEffect(() => {
+    loadEvents()
+  }, [loadEvents])
+
+  useEffect(() => {
+    if (useDemo) return undefined
+    const channel = supabase
+      .channel('attendance-events-sync')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, loadEvents)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance' }, loadAttendance)
+      .subscribe()
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [loadAttendance, loadEvents, useDemo])
+
+  useEffect(() => {
+    if (useDemo) return undefined
+    const refreshEvents = () => {
+      if (document.visibilityState === 'visible') loadEvents()
+    }
+    window.addEventListener('focus', refreshEvents)
+    document.addEventListener('visibilitychange', refreshEvents)
+    return () => {
+      window.removeEventListener('focus', refreshEvents)
+      document.removeEventListener('visibilitychange', refreshEvents)
+    }
+  }, [loadEvents, useDemo])
+
   const loadContributions = useCallback(async () => {
     if (useDemo) {
       setContributions(DEMO_CONTRIBUTIONS.map((item) => ({
@@ -261,65 +357,117 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal, a
   }, [tab, loadContributions])
 
   useEffect(() => {
-    saveLocalEvents(events)
-  }, [events])
+    if (useDemo) saveLocalEvents(events)
+  }, [events, useDemo])
 
-  const handleCreateEvent = (event) => {
+  const handleCreateEvent = async (event) => {
     event.preventDefault()
     const name = eventForm.name.trim().slice(0, 120)
     if (!name) {
       notify.warn('Enter an event name first')
       return
     }
-    const id = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`
-    const nextEvents = [
-      { id, name, location: eventForm.location.trim().slice(0, 120), date: eventForm.date, active: true },
-      ...events.map((item) => ({ ...item, active: false }))
-    ].slice(0, 100)
-    if (!saveLocalEvents(nextEvents)) notify.warn('This browser could not save event setup; it will be lost when you close the page.')
-    setEvents(nextEvents)
-    setActiveEventId(id)
-    setEventForm({ name: '', location: '', date: localDateInputValue() })
-    setShowEventForm(false)
-    notify.success('Event created. Attendance scanning is ready.')
+    setEventSaving(true)
+    try {
+      if (useDemo) {
+        const id = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`
+        const nextEvents = [
+          { id, name, location: eventForm.location.trim().slice(0, 120), date: eventForm.date, active: true },
+          ...events.map((item) => ({ ...item, active: false }))
+        ].slice(0, 100)
+        if (!saveLocalEvents(nextEvents)) throw new Error('This browser could not save event setup.')
+        setEvents(nextEvents)
+        setActiveEventId(id)
+      } else {
+        const { error } = await supabase.rpc('create_attendance_event', {
+          p_name: name,
+          p_location: eventForm.location.trim().slice(0, 120),
+          p_event_date: eventForm.date || null
+        })
+        if (error) throw error
+        await loadEvents()
+      }
+      setEventForm({ name: '', location: '', date: localDateInputValue() })
+      setShowEventForm(false)
+      notify.success('Event saved. Attendance scanning is ready on your devices.')
+    } catch (error) {
+      notify.error(error.message || 'Could not save this event')
+    } finally {
+      setEventSaving(false)
+    }
   }
 
-  const handleEndEvent = () => {
+  const handleEndEvent = async () => {
     if (!activeEvent) return
-    const endedEvents = events.map((item) => ({ ...item, active: false }))
-    if (!saveLocalEvents(endedEvents)) notify.warn('This browser could not save the event update.')
-    setEvents(endedEvents)
-    setActiveEventId('')
-    notify.success(`${activeEvent.name} ended`)
+    setEventSaving(true)
+    try {
+      if (useDemo) {
+        const endedEvents = events.map((item) => ({ ...item, active: false }))
+        if (!saveLocalEvents(endedEvents)) throw new Error('This browser could not save the event update.')
+        setEvents(endedEvents)
+        setActiveEventId('')
+      } else {
+        const { error } = await supabase.rpc('set_attendance_event_active', {
+          p_event_id: activeEvent.id,
+          p_active: false
+        })
+        if (error) throw error
+        await loadEvents()
+      }
+      notify.success(`${activeEvent.name} ended`)
+    } catch (error) {
+      notify.error(error.message || 'Could not end this event')
+    } finally {
+      setEventSaving(false)
+    }
+  }
+
+  const handleActivateEvent = async (eventToActivate) => {
+    if (!eventToActivate?.id) return
+    if (useDemo) {
+      const nextEvents = events.map((item) => ({ ...item, active: item.id === eventToActivate.id }))
+      if (!saveLocalEvents(nextEvents)) {
+        notify.error('This browser could not save the event update.')
+        return
+      }
+      setEvents(nextEvents)
+      setActiveEventId(eventToActivate.id)
+      return
+    }
+
+    setEventSaving(true)
+    try {
+      const { error } = await supabase.rpc('set_attendance_event_active', {
+        p_event_id: eventToActivate.id,
+        p_active: true
+      })
+      if (error) throw error
+      await loadEvents()
+      notify.success(`${eventToActivate.name} is now active`)
+    } catch (error) {
+      notify.error(error.message || 'Could not activate this event')
+    } finally {
+      setEventSaving(false)
+    }
   }
 
   const confirmDeleteEvent = async () => {
     if (!eventToDelete || deleteBusy) return
     setDeleteBusy(true)
-    let attendanceNote
     try {
-      attendanceNote = createEventAttendanceNote(eventToDelete)
-      const remainingEvents = events.filter((event) => event.id !== eventToDelete.id)
-      if (!saveLocalEvents(remainingEvents)) {
-        throw new Error('Could not update the event list. No attendance records were deleted.')
-      }
-
       if (useDemo) {
+        const attendanceNote = createEventAttendanceNote(eventToDelete)
+        const remainingEvents = events.filter((event) => event.id !== eventToDelete.id)
+        if (!saveLocalEvents(remainingEvents)) throw new Error('Could not update the event list.')
         setAttLog((previous) => previous.filter((record) => record.notes !== attendanceNote))
+        setEvents(remainingEvents)
+        if (activeEventId === eventToDelete.id) setActiveEventId('')
       } else {
-        const { error } = await supabase
-          .from('attendance')
-          .delete()
-          .eq('notes', attendanceNote)
-        if (error) {
-          saveLocalEvents(events)
-          throw error
-        }
-        setAttLog((previous) => previous.filter((record) => record.notes !== attendanceNote))
+        const { error } = await supabase.rpc('delete_attendance_event', { p_event_id: eventToDelete.id })
+        if (error) throw error
+        await Promise.all([loadEvents(), loadAttendance()])
       }
 
-      setEvents(remainingEvents)
-      if (activeEventId === eventToDelete.id) setActiveEventId('')
       notify.success(`Deleted ${eventToDelete.name} and its attendance records`)
       setEventToDelete(null)
     } catch (error) {
@@ -950,11 +1098,8 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal, a
                       ) : (
                         <button
                           type="button"
-                          onClick={() => {
-                            const nextEvents = events.map((item) => ({ ...item, active: item.id === event.id }))
-                            setEvents(nextEvents)
-                            setActiveEventId(event.id)
-                          }}
+                          onClick={() => handleActivateEvent(event)}
+                          disabled={eventSaving}
                         >
                           Set active
                         </button>
@@ -966,7 +1111,7 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal, a
                     <IconCalendar size={27} />
                     <strong>No events set up yet</strong>
                     <span>Create an event to start recording attendance.</span>
-                    <button type="button" className="btn btn-primary" onClick={() => { setTab('attendance'); setShowEventForm(true) }}>Create event</button>
+                    <button type="button" className="btn btn-primary" onClick={() => { setTab('attendance'); setShowEventForm(true) }} disabled={eventSaving}>Create event</button>
                   </div>
                 )}
               </div>
@@ -1682,18 +1827,18 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal, a
                 {activeEvent ? (
                   <>
                     <button type="button" className="btn btn-primary" onClick={() => setShowScanner(true)}><IconCamera size={16} /> Scan passes</button>
-                    <button type="button" className="btn btn-outline" onClick={handleEndEvent}>End event</button>
-                    <button type="button" className="btn btn-danger" onClick={() => setEventToDelete(activeEvent)}><IconTrash size={15} /> Delete event</button>
+                    <button type="button" className="btn btn-outline" onClick={handleEndEvent} disabled={eventSaving}>End event</button>
+                    <button type="button" className="btn btn-danger" onClick={() => setEventToDelete(activeEvent)} disabled={eventSaving}><IconTrash size={15} /> Delete event</button>
                   </>
                 ) : (
-                  <button type="button" className="btn btn-primary" onClick={() => setShowEventForm(true)}><IconCalendar size={16} /> Create event</button>
+                  <button type="button" className="btn btn-primary" onClick={() => setShowEventForm(true)} disabled={eventSaving}><IconCalendar size={16} /> Create event</button>
                 )}
               </div>
             </div>
 
             {events.filter((event) => !event.active).length > 0 && (
               <details className="event-history-details">
-                <summary>Recent events on this device ({events.filter((event) => !event.active).length})</summary>
+                <summary>Recent events ({events.filter((event) => !event.active).length})</summary>
                 <div className="event-history-list">
                   {events.filter((event) => !event.active).map((event) => (
                     <div className="event-history-item" key={event.id}>
@@ -1701,7 +1846,7 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal, a
                         <span>{event.name}</span>
                         <small>{[event.date, event.location].filter(Boolean).join(' · ') || 'Event ended'}</small>
                       </div>
-                      <button type="button" className="btn-icon-danger event-delete-action" onClick={() => setEventToDelete(event)} aria-label={`Delete ${event.name} and its attendance records`} title="Delete event and check-ins">
+                      <button type="button" className="btn-icon-danger event-delete-action" onClick={() => setEventToDelete(event)} aria-label={`Delete ${event.name} and its attendance records`} title="Delete event and check-ins" disabled={deleteBusy}>
                         <IconTrash size={15} />
                       </button>
                     </div>
@@ -1755,8 +1900,8 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal, a
                   <button
                     type="button"
                     className="btn-icon"
-                    onClick={loadAttendance}
-                    title="Refresh attendance records"
+                    onClick={() => { loadAttendance(); loadEvents() }}
+                    title="Refresh attendance and events"
                   >
                     <IconRefresh size={16} className={attLoading ? 'spin' : ''} />
                   </button>
@@ -1919,11 +2064,11 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal, a
                     <input id="event-location" className="input-field" maxLength={120} placeholder="e.g. Lab 204" value={eventForm.location} onChange={(event) => setEventForm((current) => ({ ...current, location: event.target.value }))} />
                   </div>
                 </div>
-                <p className="event-storage-note">Event setup is saved on this device. Check-ins are saved to the existing attendance records.</p>
+                <p className="event-storage-note">{useDemo ? 'Demo events are saved on this device.' : 'Events and attendance check-ins are saved in Supabase and shared across devices.'}</p>
               </div>
               <div className="modal-footer">
-                <button type="button" className="btn btn-outline" onClick={() => setShowEventForm(false)}>Cancel</button>
-                <button type="submit" className="btn btn-primary"><IconCalendar size={16} /> Create event</button>
+                <button type="button" className="btn btn-outline" onClick={() => setShowEventForm(false)} disabled={eventSaving}>Cancel</button>
+                <button type="submit" className="btn btn-primary" disabled={eventSaving}><IconCalendar size={16} /> {eventSaving ? 'Saving…' : 'Create event'}</button>
               </div>
             </form>
           </div>
@@ -1941,7 +2086,7 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal, a
               <button type="button" className="btn-icon" onClick={() => setEventToDelete(null)} aria-label="Close delete event dialog" disabled={deleteBusy}><IconX size={18} /></button>
             </div>
             <div className="modal-body">
-              <p className="text-sm">This removes the event from this device and permanently deletes all attendance check-ins recorded for it.</p>
+              <p className="text-sm">{useDemo ? 'This removes the demo event and its demo check-ins from this browser.' : 'This removes the event from Supabase and permanently deletes all attendance check-ins recorded for it.'}</p>
             </div>
             <div className="modal-footer">
               <button type="button" className="btn btn-outline" onClick={() => setEventToDelete(null)} disabled={deleteBusy}>Cancel</button>

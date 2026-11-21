@@ -176,9 +176,10 @@ export default function DatabaseSetupModal({ isOpen, onClose, notify }) {
             <div className="form-grid">
               <div className="info-box">
                 <div className="text-sm">
-                  Run <code>supabase/setup_complete.sql</code> in your Supabase{' '}
-                  <strong>SQL Editor</strong>. It automatically creates all tables, RLS rules,
-                  functions, and storage buckets.
+                  For a new project, run <code>supabase/setup_complete.sql</code> in the Supabase{' '}
+                  <strong>SQL Editor</strong>. For an existing project, run the incremental{' '}
+                  <code>supabase/hr_attendance_access.sql</code> update to add shared event storage
+                  without changing member records.
                 </div>
               </div>
 
@@ -190,7 +191,8 @@ create table if not exists public.members (...);
 create table if not exists public.contributions (...);
 create table if not exists public.attendance (...);
 create table if not exists public.member_users (...);
--- Includes 5 stored procedures, RLS policies, and 'qr-codes' bucket`}
+create table if not exists public.events (...);
+-- Includes attendance/event procedures, RLS policies, and 'qr-codes' bucket`}
                 </pre>
               </div>
 

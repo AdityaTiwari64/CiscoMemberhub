@@ -355,6 +355,154 @@ $$;
 revoke all on function public.can_manage_attendance() from public, anon;
 grant execute on function public.can_manage_attendance() to authenticated;
 
+-- Persist event setup centrally so it is shared by signed-in devices.
+-- Attendance remains in the existing attendance table, tagged by event ID/name in notes.
+create table if not exists public.events (
+  id uuid primary key default gen_random_uuid(),
+  name text not null check (char_length(btrim(name)) between 1 and 120),
+  location text not null default '' check (char_length(location) <= 120),
+  event_date date,
+  active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+alter table public.events enable row level security;
+revoke all on table public.events from public, anon;
+grant select, insert, update, delete on table public.events to authenticated;
+
+drop policy if exists "attendance managers read events" on public.events;
+drop policy if exists "attendance managers insert events" on public.events;
+drop policy if exists "attendance managers update events" on public.events;
+drop policy if exists "attendance managers delete events" on public.events;
+
+create policy "attendance managers read events" on public.events
+  for select using (public.can_manage_attendance());
+create policy "attendance managers insert events" on public.events
+  for insert with check (public.can_manage_attendance());
+create policy "attendance managers update events" on public.events
+  for update using (public.can_manage_attendance())
+  with check (public.can_manage_attendance());
+create policy "attendance managers delete events" on public.events
+  for delete using (public.can_manage_attendance());
+
+do $$
+begin
+  if exists (select 1 from pg_catalog.pg_publication where pubname = 'supabase_realtime')
+     and not exists (
+       select 1 from pg_catalog.pg_publication_tables
+       where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'events'
+     ) then
+    execute 'alter publication supabase_realtime add table public.events';
+  end if;
+  if exists (select 1 from pg_catalog.pg_publication where pubname = 'supabase_realtime')
+     and not exists (
+       select 1 from pg_catalog.pg_publication_tables
+       where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'attendance'
+     ) then
+    execute 'alter publication supabase_realtime add table public.attendance';
+  end if;
+end;
+$$;
+
+-- Serialize active-event changes and keep event creation atomic.
+create unique index if not exists events_one_active_idx
+  on public.events (active) where active;
+
+create or replace function public.create_attendance_event(
+  p_name text,
+  p_location text default '',
+  p_event_date date default null
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_event public.events%rowtype;
+begin
+  if not public.can_manage_attendance() then
+    raise exception 'not allowed';
+  end if;
+  if p_name is null or char_length(btrim(p_name)) not between 1 and 120 then
+    raise exception 'event name must be between 1 and 120 characters';
+  end if;
+  if char_length(coalesce(p_location, '')) > 120 then
+    raise exception 'event location must be 120 characters or fewer';
+  end if;
+
+  perform pg_catalog.pg_advisory_xact_lock(183510923, 1);
+  update public.events set active = false where active;
+  insert into public.events (name, location, event_date, active)
+  values (btrim(p_name), btrim(coalesce(p_location, '')), p_event_date, true)
+  returning * into v_event;
+
+  return pg_catalog.to_jsonb(v_event);
+end;
+$$;
+revoke all on function public.create_attendance_event(text, text, date) from public, anon;
+grant execute on function public.create_attendance_event(text, text, date) to authenticated;
+
+create or replace function public.set_attendance_event_active(p_event_id uuid, p_active boolean)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_event public.events%rowtype;
+begin
+  if not public.can_manage_attendance() then
+    raise exception 'not allowed';
+  end if;
+  if p_event_id is null or p_active is null then
+    raise exception 'event and active state are required';
+  end if;
+
+  perform pg_catalog.pg_advisory_xact_lock(183510923, 1);
+  if p_active then
+    perform 1 from public.events where id = p_event_id for update;
+    if not found then raise exception 'event not found'; end if;
+    update public.events set active = false where active and id <> p_event_id;
+  end if;
+
+  update public.events set active = p_active where id = p_event_id
+  returning * into v_event;
+  if not found then raise exception 'event not found'; end if;
+  return pg_catalog.to_jsonb(v_event);
+end;
+$$;
+revoke all on function public.set_attendance_event_active(uuid, boolean) from public, anon;
+grant execute on function public.set_attendance_event_active(uuid, boolean) to authenticated;
+
+create or replace function public.delete_attendance_event(p_event_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_event public.events%rowtype;
+  v_deleted_checkins integer;
+begin
+  if not public.can_manage_attendance() then
+    raise exception 'not allowed';
+  end if;
+  if p_event_id is null then raise exception 'event id is required'; end if;
+
+  select * into v_event from public.events where id = p_event_id for update;
+  if not found then raise exception 'event not found'; end if;
+
+  delete from public.attendance
+  where notes = '[cisco-event:' || v_event.id::text || '] ' || v_event.name;
+  get diagnostics v_deleted_checkins = row_count;
+
+  delete from public.events where id = v_event.id;
+  return pg_catalog.jsonb_build_object('deleted_checkins', v_deleted_checkins);
+end;
+$$;
+revoke all on function public.delete_attendance_event(uuid) from public, anon;
+grant execute on function public.delete_attendance_event(uuid) to authenticated;
+
 drop policy if exists "hr read attendance" on public.attendance;
 drop policy if exists "hr insert attendance" on public.attendance;
 drop policy if exists "hr delete attendance" on public.attendance;
@@ -492,3 +640,4 @@ grant execute on function public.record_attendance(text) to authenticated;
 --
 -- Do not use user_metadata for authorization; users can edit user_metadata themselves.
 commit;
+notify pgrst, 'reload schema';
