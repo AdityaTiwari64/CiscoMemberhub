@@ -1,4 +1,6 @@
-# Cisco Community Member Hub
+# CiscoMemberhub
+
+## Cisco Community Member Hub
 
 Member passes, contributions, and event attendance for the Cisco Community at VIT Bhopal.
 
