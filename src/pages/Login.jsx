@@ -39,7 +39,7 @@ export default function Login() {
           id="admin-email"
           type="email"
           className="input-field"
-          placeholder="admin@ciscoclub.org"
+          placeholder="Enter administrator email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           required

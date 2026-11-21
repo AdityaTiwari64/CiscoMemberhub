@@ -40,7 +40,7 @@ export default function MemberLogin({ portal = 'member' }) {
           id="member-login-email"
           type="email"
           className="input-field"
-          placeholder={isHrPortal ? 'name@vitbhopal.ac.in' : 'member@ciscoclub.org'}
+          placeholder={isHrPortal ? 'Enter your invited HR email' : 'Enter your member email'}
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           required

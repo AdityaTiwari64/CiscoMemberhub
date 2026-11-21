@@ -2,7 +2,6 @@ export const DEMO_MEMBERS = [
   {
     id: 'm1-demo-alex-morgan',
     full_name: 'Alex Morgan',
-    email: 'alex.morgan@ciscoclub.org',
     role: 'Club Lead',
     department: 'Engineering',
     qr_token: 'a1b2c3d4e5f6789012345678abcdef01',
@@ -12,7 +11,6 @@ export const DEMO_MEMBERS = [
   {
     id: 'm2-demo-sarah-chen',
     full_name: 'Sarah Chen',
-    email: 'sarah.chen@ciscoclub.org',
     role: 'Tech Lead',
     department: 'Cybersecurity',
     qr_token: 'b2c3d4e5f6789012345678abcdef01a2',
@@ -22,7 +20,6 @@ export const DEMO_MEMBERS = [
   {
     id: 'm3-demo-david-miller',
     full_name: 'David Miller',
-    email: 'david.m@ciscoclub.org',
     role: 'Core Team',
     department: 'Cloud & DevOps',
     qr_token: 'c3d4e5f6789012345678abcdef01a2b3',
@@ -32,7 +29,6 @@ export const DEMO_MEMBERS = [
   {
     id: 'm4-demo-priya-patel',
     full_name: 'Priya Patel',
-    email: 'priya.patel@ciscoclub.org',
     role: 'Event Coordinator',
     department: 'AI & Data Science',
     qr_token: 'd4e5f6789012345678abcdef01a2b3c4',
@@ -42,7 +38,6 @@ export const DEMO_MEMBERS = [
   {
     id: 'm5-demo-marcus-johnson',
     full_name: 'Marcus Johnson',
-    email: 'marcus.j@ciscoclub.org',
     role: 'Member',
     department: 'Networking',
     qr_token: null,
@@ -52,7 +47,6 @@ export const DEMO_MEMBERS = [
   {
     id: 'm6-demo-elena-rostova',
     full_name: 'Elena Rostova',
-    email: 'elena.r@ciscoclub.org',
     role: 'Design Lead',
     department: 'Design',
     qr_token: null,

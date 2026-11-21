@@ -296,6 +296,40 @@ $$;
 revoke all on function public.is_admin() from public, anon;
 grant execute on function public.is_admin() to authenticated;
 
+-- Harden existing definer RPCs as well as the ones replaced below.
+alter function public.get_member_by_token(text) set search_path = '';
+alter function public.get_my_member_profile() set search_path = '';
+alter function public.link_member_user(uuid, uuid) set search_path = '';
+revoke all on function public.get_member_by_token(text) from public, anon;
+grant execute on function public.get_member_by_token(text) to anon, authenticated;
+revoke all on function public.get_my_member_profile() from public, anon;
+grant execute on function public.get_my_member_profile() to authenticated;
+
+-- QR tokens are generated only on the server, with cryptographic randomness.
+create or replace function public.assign_qr(p_member uuid)
+returns text
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_token text;
+begin
+  if not public.is_admin() then
+    raise exception 'not allowed';
+  end if;
+
+  v_token := pg_catalog.replace(pg_catalog.gen_random_uuid()::text, '-', '');
+  update public.members set qr_token = v_token where id = p_member;
+  if not found then
+    raise exception 'member not found';
+  end if;
+  return v_token;
+end;
+$$;
+revoke all on function public.assign_qr(uuid) from public, anon;
+grant execute on function public.assign_qr(uuid) to authenticated;
+
 create or replace function public.is_attendance_hr()
 returns boolean
 language sql
@@ -375,7 +409,7 @@ returns json
 language plpgsql
 stable
 security definer
-set search_path = pg_catalog
+set search_path = ''
 as $$
 declare
   v_days int := greatest(1, least(coalesce(p_days, 30), 365));
@@ -410,7 +444,7 @@ create or replace function public.record_attendance(p_token text)
 returns json
 language plpgsql
 security definer
-set search_path = pg_catalog
+set search_path = ''
 as $$
 declare
   v_member public.members%rowtype;

@@ -124,7 +124,7 @@ export default function MemberModal({
               id="member-email"
               type="email"
               className="input-field"
-              placeholder="alex.morgan@example.com"
+              placeholder="Enter member email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
             />
