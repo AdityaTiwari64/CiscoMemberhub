@@ -81,19 +81,22 @@ grant execute on function public.can_manage_attendance() to authenticated;
 drop policy if exists "hr read attendance" on public.attendance;
 drop policy if exists "hr insert attendance" on public.attendance;
 drop policy if exists "hr delete attendance" on public.attendance;
+drop policy if exists "attendance managers read attendance" on public.attendance;
+drop policy if exists "attendance managers insert attendance" on public.attendance;
+drop policy if exists "attendance managers delete attendance" on public.attendance;
 
-create policy "hr read attendance" on public.attendance
-  for select using (public.is_attendance_hr());
+create policy "attendance managers read attendance" on public.attendance
+  for select using (public.can_manage_attendance());
 
-create policy "hr insert attendance" on public.attendance
+create policy "attendance managers insert attendance" on public.attendance
   for insert with check (
-    public.is_attendance_hr()
+    public.can_manage_attendance()
     and scanned_by = auth.uid()
     and notes like '[cisco-event:%'
   );
 
-create policy "hr delete attendance" on public.attendance
-  for delete using (public.is_attendance_hr());
+create policy "attendance managers delete attendance" on public.attendance
+  for delete using (public.can_manage_attendance());
 
 -- Return only what the scanner needs. HR cannot directly read member rows or QR tokens.
 create or replace function public.lookup_member_for_attendance(p_token text)
