@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import jsQR from 'jsqr'
 import { supabase } from '../lib/supabase'
+import { createEventAttendanceNote } from '../lib/attendance'
 import {
   IconX,
   IconCamera,
@@ -60,7 +61,7 @@ function tokenFromPayload(payload) {
   return null
 }
 
-export default function QrScanner({ onClose, onScan, notify }) {
+export default function QrScanner({ onClose, onScan, notify, activeEvent, members = [], isDemo = false }) {
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
   const streamRef = useRef(null)
@@ -213,11 +214,59 @@ export default function QrScanner({ onClose, onScan, notify }) {
   const handleTokenVerification = async (token) => {
     setIsProcessing(true)
     try {
-      const { data, error: err } = await supabase.rpc('record_attendance', {
-        p_token: token
-      })
+      if (!activeEvent?.id || !activeEvent?.name) {
+        throw new Error('Create or select an event before scanning attendance')
+      }
 
-      if (err) throw new Error(err.message)
+      let data
+      const eventNote = createEventAttendanceNote(activeEvent)
+
+      if (isDemo) {
+        const member = members.find((item) => item.qr_token === token && item.is_active)
+        if (!member) throw new Error('Member pass not found or inactive')
+        data = {
+          attendance_id: `demo-${Date.now()}`,
+          member_name: member.full_name,
+          member_role: member.role || 'Member',
+          scanned_at: new Date().toISOString(),
+          notes: eventNote
+        }
+      } else {
+        // A guarded RPC returns only the member fields required for attendance scanning.
+        const { data: member, error: memberError } = await supabase.rpc('lookup_member_for_attendance', { p_token: token })
+
+        if (memberError) throw new Error(memberError.message)
+        if (!member) throw new Error('Member pass not found or inactive')
+
+        const { data: existing, error: duplicateError } = await supabase
+          .from('attendance')
+          .select('id')
+          .eq('member_id', member.id)
+          .eq('notes', eventNote)
+          .maybeSingle()
+
+        if (duplicateError) throw new Error(duplicateError.message)
+        if (existing) throw new Error(`${member.full_name} is already checked in to this event`)
+
+        const { data: authData, error: authError } = await supabase.auth.getUser()
+        if (authError) throw new Error(authError.message)
+        if (!authData?.user) throw new Error('Sign in again before recording attendance')
+
+        const { data: inserted, error: insertError } = await supabase
+          .from('attendance')
+          .insert({ member_id: member.id, scanned_by: authData.user.id, notes: eventNote })
+          .select('id, scanned_at')
+          .single()
+
+        if (insertError) throw new Error(insertError.message)
+        data = {
+          attendance_id: inserted.id,
+          member_name: member.full_name,
+          member_role: member.role,
+          scanned_at: inserted.scanned_at,
+          notes: eventNote
+        }
+      }
 
       if (soundEnabled) playBeep(true)
 
@@ -288,7 +337,7 @@ export default function QrScanner({ onClose, onScan, notify }) {
               <h3 id="scanner-modal-title" className="modal-title">
                 Live Attendance Check-In
               </h3>
-              <p className="modal-subtitle">Fast QR scanner for member ID cards</p>
+              <p className="modal-subtitle">{activeEvent?.name ? `Checking in to ${activeEvent.name}` : 'Create an event before scanning'}</p>
             </div>
           </div>
 

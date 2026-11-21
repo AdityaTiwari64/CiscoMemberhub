@@ -1,121 +1,150 @@
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { useTheme } from './ThemeContext'
 import {
-  IconLogo,
   IconSun,
   IconMoon,
   IconLogOut,
   IconCamera,
-  IconShield,
-  IconUsers
+  IconUsers,
+  IconCalendar,
+  IconAward,
+  IconIdCard,
+  IconLayoutGrid,
+  IconX
 } from './Icons'
 
+const ADMIN_ITEMS = [
+  { id: 'overview', label: 'Dashboard', icon: IconLayoutGrid },
+  { id: 'members', label: 'Members', icon: IconUsers },
+  { id: 'attendance', label: 'Attendance', icon: IconCalendar },
+  { id: 'contributions', label: 'Contributions', icon: IconAward }
+]
+
+const MEMBER_ITEMS = [
+  { id: 'pass', label: 'My digital pass', icon: IconIdCard },
+  { id: 'contributions', label: 'Contributions', icon: IconAward },
+  { id: 'attendance', label: 'Attendance history', icon: IconCalendar }
+]
+
+const HR_ITEMS = [
+  { id: 'attendance', label: 'Attendance', icon: IconCalendar }
+]
+
 export default function Navbar({
-  role = 'admin', // 'admin' | 'member' | 'public'
+  role = 'admin',
   userName = '',
   onOpenScanner,
-  activeTab,
+  activeTab = 'overview',
   setActiveTab
 }) {
   const { theme, toggleTheme } = useTheme()
+  const [mobileOpen, setMobileOpen] = useState(false)
+  const items = role === 'member' ? MEMBER_ITEMS : role === 'hr' ? HR_ITEMS : ADMIN_ITEMS
+  const title = role === 'member' ? 'Member portal' : role === 'hr' ? 'HR attendance' : 'Admin workspace'
+  const initials = userName
+    ? userName.split(/\s+/).map((part) => part[0]).slice(0, 2).join('').toUpperCase()
+    : role === 'admin' ? 'AD' : role === 'hr' ? 'HR' : 'MB'
 
   const handleSignOut = async () => {
     await supabase.auth.signOut()
   }
 
+  useEffect(() => {
+    if (!mobileOpen) return undefined
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') setMobileOpen(false)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [mobileOpen])
+
+  useEffect(() => {
+    const closeOnDesktop = () => {
+      if (window.innerWidth > 800) setMobileOpen(false)
+    }
+    window.addEventListener('resize', closeOnDesktop)
+    return () => window.removeEventListener('resize', closeOnDesktop)
+  }, [])
+
   return (
-    <header className="site-header">
-      <div className="header-inner wrap">
-        <div className="brand-group">
-          <div className="brand-logo">
-            <IconLogo size={24} />
-          </div>
-          <div className="brand-text">
-            <div className="brand-title">Cisco Member Hub</div>
-            <div className="brand-subtitle">
-              {role === 'admin' && (
-                <span className="badge badge-accent">
-                  <IconShield size={11} /> Admin Console
-                </span>
-              )}
-              {role === 'member' && (
-                <span className="badge badge-primary">
-                  <IconUsers size={11} /> Member Portal
-                </span>
-              )}
-              {role === 'public' && (
-                <span className="badge badge-neutral">Digital Credential</span>
-              )}
-            </div>
-          </div>
+    <>
+      <div className="mobile-menu-bar">
+        <button
+          type="button"
+          className="mobile-menu-trigger"
+          onClick={() => setMobileOpen((open) => !open)}
+          aria-label={mobileOpen ? 'Close navigation menu' : 'Open navigation menu'}
+          aria-expanded={mobileOpen}
+          aria-controls="community-navigation"
+        >
+          {mobileOpen ? <IconX size={23} /> : (
+            <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+              <path d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          )}
+        </button>
+      </div>
+      {mobileOpen && <button type="button" className="mobile-sidebar-backdrop" onClick={() => setMobileOpen(false)} aria-label="Close navigation menu" />}
+
+      <aside id="community-navigation" className={`site-header app-sidebar ${mobileOpen ? 'mobile-open' : ''}`}>
+        <div className="sidebar-brand-wrap">
+          <a className="sidebar-brand" href="/" aria-label="Cisco Community home">
+            <img src="/logo.png" alt="Cisco Community VIT Bhopal" />
+          </a>
         </div>
 
-        {/* Center navigation tabs if in Admin mode */}
-        {role === 'admin' && setActiveTab && (
-          <nav aria-label="Admin tabs" className="nav-segmented">
+        <div className="sidebar-workspace-label">WORKSPACE</div>
+        <nav aria-label={`${role} navigation`} className="rail-nav">
+          {items.map(({ id, label, icon: Icon }) => (
             <button
+              key={id}
               type="button"
-              className={`nav-seg-btn ${activeTab === 'members' ? 'active' : ''}`}
-              onClick={() => setActiveTab('members')}
+              className={`rail-nav-item ${activeTab === id ? 'active' : ''}`}
+              onClick={() => { setActiveTab?.(id); setMobileOpen(false) }}
+              aria-label={label}
+              aria-current={activeTab === id ? 'page' : undefined}
+              data-tooltip={label}
+              title={label}
             >
-              <IconUsers size={15} />
-              <span>Members</span>
+              <Icon size={19} />
+              <span>{label}</span>
             </button>
-            <button
-              type="button"
-              className={`nav-seg-btn ${activeTab === 'attendance' ? 'active' : ''}`}
-              onClick={() => setActiveTab('attendance')}
-            >
-              <span>Attendance</span>
-            </button>
-          </nav>
+          ))}
+        </nav>
+
+        {(role === 'admin' || role === 'hr') && onOpenScanner && (
+          <button type="button" className="sidebar-scan-button" onClick={() => { onOpenScanner(); setMobileOpen(false) }} aria-label="Scan attendance" title="Scan attendance">
+            <IconCamera size={17} />
+            <span>Scan attendance</span>
+          </button>
         )}
 
-        {/* Right side controls */}
-        <div className="header-actions">
-          {role === 'admin' && onOpenScanner && (
-            <button
-              type="button"
-              className="btn btn-primary btn-scanner"
-              onClick={onOpenScanner}
-              title="Open QR Attendance Scanner"
-            >
-              <IconCamera size={16} />
-              <span className="hide-on-mobile">Scan Check-In</span>
-            </button>
-          )}
-
-          {userName && (
-            <div className="user-pill hide-on-mobile" title={userName}>
-              <span className="user-dot"></span>
-              <span className="user-name">{userName}</span>
-            </div>
-          )}
-
+        <div className="sidebar-footer">
+          <div className="sidebar-user-avatar" aria-label={userName || title} title={userName || title}>{initials}</div>
+          <div className="sidebar-user-copy">
+            <strong>{userName || title}</strong>
+            <span>{role === 'member' ? 'Community member' : role === 'hr' ? 'Attendance manager' : 'Administrator'}</span>
+          </div>
           <button
             type="button"
-            className="btn-icon"
+            className="sidebar-footer-icon"
             onClick={toggleTheme}
-            title={`Switch to ${theme === 'dark' ? 'Light' : 'Dark'} mode`}
-            aria-label="Toggle theme"
+            title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+            aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
           >
-            {theme === 'dark' ? <IconSun size={18} /> : <IconMoon size={18} />}
+            {theme === 'dark' ? <IconSun size={17} /> : <IconMoon size={17} />}
           </button>
-
-          {role !== 'public' && (
-            <button
-              type="button"
-              className="btn-icon text-danger"
-              onClick={handleSignOut}
-              title="Sign out of account"
-              aria-label="Sign out"
-            >
-              <IconLogOut size={18} />
-            </button>
-          )}
+          <button type="button" className="sidebar-footer-icon" onClick={handleSignOut} title="Sign out" aria-label="Sign out">
+            <IconLogOut size={17} />
+          </button>
         </div>
-      </div>
-    </header>
+      </aside>
+    </>
   )
 }

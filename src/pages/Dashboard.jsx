@@ -2,13 +2,14 @@ import React, { useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import jsQR from 'jsqr'
 import QRCode from 'qrcode'
 import { supabase, configMissing } from '../lib/supabase'
-import { DEMO_MEMBERS, DEMO_ATTENDANCE } from '../data/demoData'
+import { DEMO_MEMBERS, DEMO_ATTENDANCE, DEMO_CONTRIBUTIONS } from '../data/demoData'
 import Navbar from '../components/Navbar'
 import MemberModal from '../components/MemberModal'
 import ContributionsModal from '../components/ContributionsModal'
 import LinkUserModal from '../components/LinkUserModal'
 import IdCard from '../components/IdCard'
 import QrScanner from '../components/QrScanner'
+import { createEventAttendanceNote, getAttendanceEventName, readLocalEvents, saveLocalEvents } from '../lib/attendance'
 import { useToast } from '../components/Toast'
 import {
   IconUsers,
@@ -41,15 +42,22 @@ const profileUrl = (token) => `${window.location.origin}/m/${token}`
 // Helper: decode QR from uploaded image file
 async function decodeQrFromFile(file) {
   const bitmap = await createImageBitmap(file)
-  const canvas = document.createElement('canvas')
-  canvas.width = bitmap.width
-  canvas.height = bitmap.height
-  const ctx = canvas.getContext('2d')
-  ctx.drawImage(bitmap, 0, 0)
-  const img = ctx.getImageData(0, 0, canvas.width, canvas.height)
-  const result = jsQR(img.data, img.width, img.height)
-  if (!result) throw new Error('No QR code found in uploaded image')
-  return result.data
+  try {
+    if (bitmap.width > 4096 || bitmap.height > 4096) throw new Error('Image dimensions are too large')
+    const scale = Math.min(1, 2048 / Math.max(bitmap.width, bitmap.height))
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale))
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale))
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    if (!ctx) throw new Error('Could not process this image')
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+    const img = ctx.getImageData(0, 0, canvas.width, canvas.height)
+    const result = jsQR(img.data, img.width, img.height)
+    if (!result) throw new Error('No QR code found in uploaded image')
+    return result.data
+  } finally {
+    bitmap.close?.()
+  }
 }
 
 function tokenFromPayload(payload) {
@@ -61,6 +69,29 @@ function tokenFromPayload(payload) {
   }
   if (/^[A-Za-z0-9_-]{16,}$/.test(payload.trim())) return payload.trim()
   throw new Error('This QR does not contain a valid token or /m/<token> link')
+}
+
+function localDateInputValue() {
+  const now = new Date()
+  return new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10)
+}
+
+function csvCell(value) {
+  let text = String(value ?? '')
+  if (/^[\u0000-\u0020]*[=+\-@]/.test(text)) text = `'${text}`
+  return `"${text.replace(/"/g, '""')}"`
+}
+
+function downloadCsv(filename, rows) {
+  const blob = new Blob([`\uFEFF${rows.map((row) => row.join(',')).join('\r\n')}`], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
 async function downloadQrCodeImage(member, notify) {
@@ -80,12 +111,14 @@ async function downloadQrCodeImage(member, notify) {
   }
 }
 
-export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal }) {
+export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal, accessRole = 'admin' }) {
   const notify = useToast()
+  const isAttendanceHr = accessRole === 'hr'
   const useDemo = isDemo || configMissing
   const [members, setMembers] = useState(() => (useDemo ? DEMO_MEMBERS : []))
   const [loading, setLoading] = useState(!useDemo)
-  const [tab, setTab] = useState('members') // 'members' | 'attendance'
+  const [tab, setTab] = useState(isAttendanceHr ? 'attendance' : 'overview') // 'overview' | 'members' | 'attendance' | 'contributions'
+  const [overviewPeriod, setOverviewPeriod] = useState('month')
 
   // Search & Filters
   const [search, setSearch] = useState('')
@@ -103,11 +136,27 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
   const [linkingMember, setLinkingMember] = useState(null)
   const [showScanner, setShowScanner] = useState(false)
   const [memberToDelete, setMemberToDelete] = useState(null)
+  const [attendanceToDelete, setAttendanceToDelete] = useState(null)
+  const [eventToDelete, setEventToDelete] = useState(null)
+  const [deleteBusy, setDeleteBusy] = useState(false)
 
   // Attendance
   const [attLog, setAttLog] = useState(() => (useDemo ? DEMO_ATTENDANCE : []))
   const [attLoading, setAttLoading] = useState(false)
   const [attSearch, setAttSearch] = useState('')
+  const [contributions, setContributions] = useState(() => (useDemo ? DEMO_CONTRIBUTIONS : []))
+  const [contribLoading, setContribLoading] = useState(false)
+  const [contribSearch, setContribSearch] = useState('')
+  const [contribTargetId, setContribTargetId] = useState('')
+
+  // Event details stay on this device; each attendance row stores its event name in the existing notes column.
+  const [events, setEvents] = useState(() => readLocalEvents())
+  const [activeEventId, setActiveEventId] = useState(() => readLocalEvents().find((event) => event.active)?.id || '')
+  const [showEventForm, setShowEventForm] = useState(false)
+  const [eventForm, setEventForm] = useState({ name: '', location: '', date: localDateInputValue() })
+  const activeEvent = events.find((event) => event.id === activeEventId && event.active) || events.find((event) => event.active) || null
+  const activeEventNote = activeEvent ? createEventAttendanceNote(activeEvent) : ''
+  const activeEventCheckIns = activeEventNote ? attLog.filter((record) => record.notes === activeEventNote).length : 0
 
   // Upload QR handling
   const fileRef = useRef(null)
@@ -115,6 +164,11 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
 
   // Load members
   const loadMembers = useCallback(async () => {
+    if (isAttendanceHr) {
+      setMembers([])
+      setLoading(false)
+      return
+    }
     if (useDemo) {
       setLoading(false)
       return
@@ -131,7 +185,7 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
       setMembers(data || [])
     }
     setLoading(false)
-  }, [useDemo, notify])
+  }, [isAttendanceHr, useDemo, notify])
 
   useEffect(() => {
     loadMembers()
@@ -144,20 +198,159 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
       return
     }
     setAttLoading(true)
-    const { data, error } = await supabase.rpc('get_attendance_log', { p_days: 30 })
+    if (isAttendanceHr) {
+      const { data, error } = await supabase.rpc('get_attendance_log', { p_days: 30 })
+      if (error) {
+        notify.error(error.message)
+      } else {
+        setAttLog(Array.isArray(data) ? data : [])
+      }
+      setAttLoading(false)
+      return
+    }
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+    const { data, error } = await supabase
+      .from('attendance')
+      .select('id, scanned_at, notes, members!inner(full_name, role)')
+      .gte('scanned_at', since)
+      .order('scanned_at', { ascending: false })
     if (error) {
       notify.error(error.message)
     } else {
-      setAttLog(data || [])
+      setAttLog((data || []).map((record) => ({
+        ...record,
+        member_name: record.members?.full_name || 'Member',
+        member_role: record.members?.role || 'Member'
+      })))
     }
     setAttLoading(false)
-  }, [useDemo, notify])
+  }, [isAttendanceHr, useDemo, notify])
 
   useEffect(() => {
-    if (tab === 'attendance') {
+    if (tab === 'attendance' || tab === 'overview') {
       loadAttendance()
     }
   }, [tab, loadAttendance])
+
+  const loadContributions = useCallback(async () => {
+    if (useDemo) {
+      setContributions(DEMO_CONTRIBUTIONS.map((item) => ({
+        ...item,
+        member_name: DEMO_MEMBERS.find((member) => member.id === item.member_id)?.full_name || 'Member'
+      })))
+      setContribLoading(false)
+      return
+    }
+    setContribLoading(true)
+    const { data, error } = await supabase
+      .from('contributions')
+      .select('*')
+      .order('created_at', { ascending: false })
+
+    if (error) {
+      notify.error(error.message)
+    } else {
+      const memberNames = new Map(members.map((member) => [member.id, member.full_name]))
+      setContributions((data || []).map((item) => ({ ...item, member_name: memberNames.get(item.member_id) || 'Member' })))
+    }
+    setContribLoading(false)
+  }, [useDemo, members, notify])
+
+  useEffect(() => {
+    if (tab === 'contributions' || tab === 'overview') loadContributions()
+  }, [tab, loadContributions])
+
+  useEffect(() => {
+    saveLocalEvents(events)
+  }, [events])
+
+  const handleCreateEvent = (event) => {
+    event.preventDefault()
+    const name = eventForm.name.trim().slice(0, 120)
+    if (!name) {
+      notify.warn('Enter an event name first')
+      return
+    }
+    const id = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const nextEvents = [
+      { id, name, location: eventForm.location.trim().slice(0, 120), date: eventForm.date, active: true },
+      ...events.map((item) => ({ ...item, active: false }))
+    ].slice(0, 100)
+    if (!saveLocalEvents(nextEvents)) notify.warn('This browser could not save event setup; it will be lost when you close the page.')
+    setEvents(nextEvents)
+    setActiveEventId(id)
+    setEventForm({ name: '', location: '', date: localDateInputValue() })
+    setShowEventForm(false)
+    notify.success('Event created. Attendance scanning is ready.')
+  }
+
+  const handleEndEvent = () => {
+    if (!activeEvent) return
+    const endedEvents = events.map((item) => ({ ...item, active: false }))
+    if (!saveLocalEvents(endedEvents)) notify.warn('This browser could not save the event update.')
+    setEvents(endedEvents)
+    setActiveEventId('')
+    notify.success(`${activeEvent.name} ended`)
+  }
+
+  const confirmDeleteEvent = async () => {
+    if (!eventToDelete || deleteBusy) return
+    setDeleteBusy(true)
+    let attendanceNote
+    try {
+      attendanceNote = createEventAttendanceNote(eventToDelete)
+      const remainingEvents = events.filter((event) => event.id !== eventToDelete.id)
+      if (!saveLocalEvents(remainingEvents)) {
+        throw new Error('Could not update the event list. No attendance records were deleted.')
+      }
+
+      if (useDemo) {
+        setAttLog((previous) => previous.filter((record) => record.notes !== attendanceNote))
+      } else {
+        const { error } = await supabase
+          .from('attendance')
+          .delete()
+          .eq('notes', attendanceNote)
+        if (error) {
+          saveLocalEvents(events)
+          throw error
+        }
+        setAttLog((previous) => previous.filter((record) => record.notes !== attendanceNote))
+      }
+
+      setEvents(remainingEvents)
+      if (activeEventId === eventToDelete.id) setActiveEventId('')
+      notify.success(`Deleted ${eventToDelete.name} and its attendance records`)
+      setEventToDelete(null)
+    } catch (error) {
+      notify.error(error.message || 'Could not delete this event')
+    } finally {
+      setDeleteBusy(false)
+    }
+  }
+
+  const confirmDeleteAttendance = async () => {
+    if (!attendanceToDelete?.id || deleteBusy) return
+    setDeleteBusy(true)
+    try {
+      if (useDemo) {
+        setAttLog((previous) => previous.filter((record) => record.id !== attendanceToDelete.id))
+      } else {
+        const { error } = await supabase
+          .from('attendance')
+          .delete()
+          .eq('id', attendanceToDelete.id)
+        if (error) throw error
+        setAttLog((previous) => previous.filter((record) => record.id !== attendanceToDelete.id))
+      }
+      notify.success(`Removed ${attendanceToDelete.member_name}'s attendance record`)
+      setAttendanceToDelete(null)
+    } catch (error) {
+      notify.error(error.message || 'Could not delete this attendance record')
+    } finally {
+      setDeleteBusy(false)
+    }
+  }
 
   // Add / Edit Member
   const handleSaveMember = async (formValues) => {
@@ -300,7 +493,7 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
     const member = uploadTarget.current
     if (!file || !member) return
 
-    if (!file.type.startsWith('image/') || file.size > 2 * 1024 * 1024) {
+    if (!['image/png', 'image/jpeg'].includes(file.type) || file.size > 2 * 1024 * 1024) {
       notify.error('Please upload a PNG or JPEG image under 2MB')
       return
     }
@@ -404,25 +597,18 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
       return
     }
 
-    const headers = ['Full Name', 'Role', 'Department', 'Email', 'Active', 'Has QR', 'Joined Date']
+    const headers = ['Full Name', 'Role', 'Department', 'Email', 'Active', 'Has QR', 'Joined Date'].map(csvCell)
     const rows = filteredMembers.map((m) => [
-      `"${(m.full_name || '').replace(/"/g, '""')}"`,
-      `"${(m.role || '').replace(/"/g, '""')}"`,
-      `"${(m.department || '').replace(/"/g, '""')}"`,
-      `"${(m.email || '').replace(/"/g, '""')}"`,
-      m.is_active ? 'Active' : 'Inactive',
-      m.qr_token ? 'Yes' : 'No',
-      new Date(m.created_at).toISOString().split('T')[0]
+      csvCell(m.full_name),
+      csvCell(m.role),
+      csvCell(m.department),
+      csvCell(m.email),
+      csvCell(m.is_active ? 'Active' : 'Inactive'),
+      csvCell(m.qr_token ? 'Yes' : 'No'),
+      csvCell(new Date(m.created_at).toISOString().split('T')[0])
     ])
 
-    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((r) => r.join(','))].join('\n')
-    const encodedUri = encodeURI(csvContent)
-    const link = document.createElement('a')
-    link.setAttribute('href', encodedUri)
-    link.setAttribute('download', `club_members_${new Date().toISOString().split('T')[0]}.csv`)
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
+    downloadCsv(`club_members_${localDateInputValue()}.csv`, [headers, ...rows])
     notify.success('Exported members CSV')
   }
 
@@ -433,26 +619,19 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
       return
     }
 
-    const headers = ['Member Name', 'Role', 'Date', 'Time', 'Notes']
+    const headers = ['Member Name', 'Role', 'Event', 'Date', 'Time'].map(csvCell)
     const rows = attLog.map((a) => {
       const d = new Date(a.scanned_at)
       return [
-        `"${(a.member_name || '').replace(/"/g, '""')}"`,
-        `"${(a.member_role || '').replace(/"/g, '""')}"`,
-        d.toLocaleDateString(),
-        d.toLocaleTimeString(),
-        `"${(a.notes || '').replace(/"/g, '""')}"`
+        csvCell(a.member_name),
+        csvCell(a.member_role),
+        csvCell(getAttendanceEventName(a.notes) || a.notes),
+        csvCell(d.toLocaleDateString()),
+        csvCell(d.toLocaleTimeString())
       ]
     })
 
-    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((r) => r.join(','))].join('\n')
-    const encodedUri = encodeURI(csvContent)
-    const link = document.createElement('a')
-    link.setAttribute('href', encodedUri)
-    link.setAttribute('download', `attendance_log_${new Date().toISOString().split('T')[0]}.csv`)
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
+    downloadCsv(`attendance_log_${localDateInputValue()}.csv`, [headers, ...rows])
     notify.success('Exported attendance log CSV')
   }
 
@@ -498,6 +677,14 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
     )
   }, [attLog, attSearch])
 
+  const filteredContributions = useMemo(() => {
+    if (!contribSearch.trim()) return contributions
+    const q = contribSearch.toLowerCase()
+    return contributions.filter((item) =>
+      `${item.title || ''} ${item.description || ''} ${item.member_name || ''}`.toLowerCase().includes(q)
+    )
+  }, [contributions, contribSearch])
+
   // Stats
   const stats = useMemo(() => {
     const total = members.length
@@ -506,6 +693,69 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
     const attCount = attLog.length
     return { total, active, withQr, attCount }
   }, [members, attLog])
+
+  const overviewData = useMemo(() => {
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const attendanceBuckets = []
+    const getCount = (matches) => attLog.filter((record) => {
+      const scannedAt = new Date(record.scanned_at)
+      return !Number.isNaN(scannedAt.getTime()) && matches(scannedAt)
+    }).length
+
+    if (overviewPeriod === 'today') {
+      for (let index = 0; index < 6; index += 1) {
+        const startHour = index * 4
+        attendanceBuckets.push({
+          label: startHour === 0 ? '12a' : startHour < 12 ? `${startHour}a` : startHour === 12 ? '12p' : `${startHour - 12}p`,
+          count: getCount((scannedAt) => scannedAt.toDateString() === today.toDateString() && Math.floor(scannedAt.getHours() / 4) === index)
+        })
+      }
+    } else if (overviewPeriod === 'week') {
+      const firstDay = new Date(today)
+      firstDay.setDate(today.getDate() - ((today.getDay() + 6) % 7))
+      for (let index = 0; index < 7; index += 1) {
+        const date = new Date(firstDay)
+        date.setDate(firstDay.getDate() + index)
+        attendanceBuckets.push({
+          label: date.toLocaleDateString(undefined, { weekday: 'short' }),
+          count: getCount((scannedAt) => scannedAt.toDateString() === date.toDateString())
+        })
+      }
+    } else {
+      const daysThisMonth = today.getDate()
+      const weekCount = Math.ceil(daysThisMonth / 7)
+      for (let index = 0; index < weekCount; index += 1) {
+        const startDay = index * 7 + 1
+        const endDay = Math.min(startDay + 6, daysThisMonth)
+        const start = new Date(today.getFullYear(), today.getMonth(), startDay)
+        const end = new Date(today.getFullYear(), today.getMonth(), endDay, 23, 59, 59, 999)
+        attendanceBuckets.push({
+          label: `W${index + 1}`,
+          count: getCount((scannedAt) => scannedAt >= start && scannedAt <= end)
+        })
+      }
+    }
+
+    const maxAttendance = Math.max(1, ...attendanceBuckets.map((bucket) => bucket.count))
+    const recentContributions = [...contributions]
+      .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
+      .slice(0, 4)
+    const recentAttendance = [...attLog]
+      .sort((a, b) => new Date(b.scanned_at || 0) - new Date(a.scanned_at || 0))
+      .slice(0, 5)
+    const eventCards = [...events]
+      .sort((a, b) => Number(b.active) - Number(a.active) || String(b.date || '').localeCompare(String(a.date || '')))
+      .slice(0, 4)
+      .map((event) => ({
+      ...event,
+      checkIns: attLog.filter((record) => getAttendanceEventName(record.notes) === event.name).length
+      }))
+    const activePercent = stats.total ? Math.round((stats.active / stats.total) * 100) : 0
+    const passPercent = stats.total ? Math.round((stats.withQr / stats.total) * 100) : 0
+
+    return { attendanceBuckets, maxAttendance, recentContributions, recentAttendance, eventCards, activePercent, passPercent }
+  }, [attLog, contributions, events, overviewPeriod, stats])
 
   return (
     <div className="dashboard-layout">
@@ -545,15 +795,73 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
 
       {/* Navbar */}
       <Navbar
-        role="admin"
-        onOpenScanner={() => setShowScanner(true)}
+        role={accessRole}
+        onOpenScanner={() => {
+          if (activeEvent) setShowScanner(true)
+          else {
+            setTab('attendance')
+            setShowEventForm(true)
+            notify.warn('Create an event before scanning attendance')
+          }
+        }}
         activeTab={tab}
         setActiveTab={setTab}
       />
 
-      <main className="wrap main-content">
+      <main className={`wrap main-content ${tab === 'attendance' ? 'attendance-main-content' : ''}`}>
+        <header className="page-heading">
+          <div>
+            <p className="page-eyebrow">CISCO COMMUNITY · VIT BHOPAL</p>
+            <h1>{tab === 'overview' ? 'Community dashboard' : tab === 'members' ? 'Members' : tab === 'attendance' ? 'Attendance' : 'Contributions'}</h1>
+            <p>{tab === 'overview'
+              ? 'Manage and track your community activity.'
+              : tab === 'members'
+              ? 'Manage your community roster and member passes.'
+              : tab === 'attendance'
+              ? 'Create an event, then scan member passes to record attendance.'
+              : 'Recognize the projects, milestones, and service behind your community.'}</p>
+          </div>
+          {tab === 'attendance' && activeEvent && (
+            <div className="active-event-pill"><span className="status-dot" /> Scanning for {activeEvent.name}</div>
+          )}
+          {tab === 'overview' && (
+            <div className="overview-heading-tools">
+              <label className="overview-search" aria-label="Search members">
+                <IconSearch size={17} />
+                <input
+                  type="search"
+                  placeholder="Search members…"
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  onKeyDown={(event) => { if (event.key === 'Enter') setTab('members') }}
+                />
+              </label>
+              <div className="overview-filter-row">
+                <div className="overview-period-tabs" role="group" aria-label="Attendance chart date range">
+                  {[
+                    { id: 'today', label: 'Today' },
+                    { id: 'week', label: 'This week' },
+                    { id: 'month', label: 'This month' }
+                  ].map((period) => (
+                    <button
+                      key={period.id}
+                      type="button"
+                      className={overviewPeriod === period.id ? 'active' : ''}
+                      onClick={() => setOverviewPeriod(period.id)}
+                      aria-pressed={overviewPeriod === period.id}
+                    >
+                      {period.label}
+                    </button>
+                  ))}
+                </div>
+                <button type="button" className="overview-report-button" onClick={() => setTab('attendance')}>Reports</button>
+              </div>
+            </div>
+          )}
+        </header>
+
         {/* KPI Stats Bar */}
-        <section aria-label="Key Performance Indicators" className="stats-grid">
+        {tab !== 'overview' && <section aria-label="Key Performance Indicators" className="stats-grid">
           <div className="stat-card">
             <div className="stat-icon-wrap bg-blue-subtle text-primary">
               <IconUsers size={22} />
@@ -597,7 +905,7 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
               View Log ↗
             </button>
           </div>
-        </section>
+        </section>}
 
         {/* Hidden file input for QR upload */}
         <input
@@ -607,6 +915,194 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
           style={{ display: 'none' }}
           onChange={handleFileUpload}
         />
+
+        {tab === 'overview' && (
+          <section className="community-dashboard-grid" aria-label="Community dashboard overview">
+            <section className="overview-panel overview-event-board" aria-labelledby="event-board-title">
+              <div className="overview-panel-heading">
+                <div>
+                  <h2 id="event-board-title">Events</h2>
+                  <p>Coordinate upcoming and active check-ins</p>
+                </div>
+                <button
+                  type="button"
+                  className="overview-add-event"
+                  aria-label="Create event"
+                  onClick={() => { setTab('attendance'); setShowEventForm(true) }}
+                >
+                  +
+                </button>
+              </div>
+              <div className="overview-event-list">
+                {overviewData.eventCards.length > 0 ? overviewData.eventCards.map((event) => (
+                  <article className={`overview-event-item ${event.active ? 'active' : ''}`} key={event.id}>
+                    <div className="overview-event-item-top">
+                      <span className={`overview-event-dot ${event.active ? 'active' : ''}`} />
+                      <span className="overview-event-item-state">{event.active ? 'Active event' : 'Event'}</span>
+                      {event.active && <span className="overview-live-mark">LIVE</span>}
+                    </div>
+                    <h3>{event.name}</h3>
+                    <p>{[event.date, event.location].filter(Boolean).join(' · ') || 'Event details not added'}</p>
+                    <div className="overview-event-item-footer">
+                      <span>{event.checkIns} check-in{event.checkIns === 1 ? '' : 's'}</span>
+                      {event.active ? (
+                        <button type="button" onClick={() => setTab('attendance')}>Open event</button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nextEvents = events.map((item) => ({ ...item, active: item.id === event.id }))
+                            setEvents(nextEvents)
+                            setActiveEventId(event.id)
+                          }}
+                        >
+                          Set active
+                        </button>
+                      )}
+                    </div>
+                  </article>
+                )) : (
+                  <div className="overview-empty-state overview-events-empty">
+                    <IconCalendar size={27} />
+                    <strong>No events set up yet</strong>
+                    <span>Create an event to start recording attendance.</span>
+                    <button type="button" className="btn btn-primary" onClick={() => { setTab('attendance'); setShowEventForm(true) }}>Create event</button>
+                  </div>
+                )}
+              </div>
+              {overviewData.eventCards.length > 0 && (
+                <button type="button" className="overview-see-all" onClick={() => setTab('attendance')}>Manage events <span aria-hidden="true">›</span></button>
+              )}
+            </section>
+
+            <div className="overview-center-column">
+              <div className="overview-chart-row">
+                <section className="overview-panel overview-members-panel" aria-labelledby="member-snapshot-title">
+                  <div className="overview-panel-heading">
+                    <div>
+                      <h2 id="member-snapshot-title">Member overview</h2>
+                      <p>Active community profiles</p>
+                    </div>
+                    <button type="button" className="overview-panel-icon-button" onClick={() => setTab('members')} aria-label="Manage members">↗</button>
+                  </div>
+                  <div className="overview-donut-wrap">
+                    <div className="overview-donut" style={{ '--active-ratio': `${overviewData.activePercent}%` }} role="img" aria-label={`${overviewData.activePercent}% active members`}>
+                      <div><strong>{stats.total}</strong><span>members</span></div>
+                    </div>
+                  </div>
+                  <div className="overview-member-legend">
+                    <div><span className="overview-legend-dot metric-green-dot" /><span>Active</span><strong>{stats.active}</strong></div>
+                    <div><span className="overview-legend-dot metric-muted-dot" /><span>Inactive</span><strong>{stats.total - stats.active}</strong></div>
+                  </div>
+                </section>
+
+                <section className="overview-panel overview-attendance-panel" aria-labelledby="attendance-trend-title">
+                  <div className="overview-panel-heading">
+                    <div>
+                      <h2 id="attendance-trend-title">Attendance trend</h2>
+                      <p>{overviewPeriod === 'today' ? 'Check-ins by time of day' : overviewPeriod === 'week' ? 'Check-ins over the last 7 days' : 'Check-ins by week this month'}</p>
+                    </div>
+                    <button type="button" className="overview-panel-icon-button" onClick={() => setTab('attendance')} aria-label="Open attendance">↗</button>
+                  </div>
+                  <div className="overview-line-chart" role="img" aria-label={`Attendance trend: ${overviewData.attendanceBuckets.map((bucket) => `${bucket.label} ${bucket.count}`).join(', ')}`}>
+                    <div className="overview-chart-grid-lines" aria-hidden="true"><i /><i /><i /></div>
+                    <div className="overview-chart-bars" style={{ '--bucket-count': overviewData.attendanceBuckets.length }}>
+                      {overviewData.attendanceBuckets.map((bucket) => (
+                        <div className="overview-chart-bar-column" key={bucket.label}>
+                          <span>{bucket.count || ''}</span>
+                          <div className="overview-chart-bar-track">
+                            <div className="overview-chart-bar-fill" style={{ height: `${bucket.count ? Math.max(9, (bucket.count / overviewData.maxAttendance) * 100) : 3}%` }} />
+                          </div>
+                          <small>{bucket.label}</small>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="overview-chart-footnote"><span className="overview-legend-dot metric-blue-dot" /> {overviewData.attendanceBuckets.reduce((sum, bucket) => sum + bucket.count, 0)} check-ins in this range</div>
+                </section>
+              </div>
+
+              <section className="overview-panel overview-progress-panel" aria-labelledby="community-coverage-title">
+                <div className="overview-panel-heading">
+                  <div>
+                    <h2 id="community-coverage-title">Community coverage</h2>
+                    <p>Member readiness and event participation</p>
+                  </div>
+                  <button type="button" className="overview-panel-icon-button" onClick={() => setTab('members')} aria-label="View community records">↗</button>
+                </div>
+                <div className="overview-progress-list">
+                  <div className="overview-progress-item">
+                    <div><span>Active members</span><strong>{stats.active} / {stats.total}</strong></div>
+                    <div className="overview-progress-track"><span className="coverage-green" style={{ width: `${overviewData.activePercent}%` }} /></div>
+                  </div>
+                  <div className="overview-progress-item">
+                    <div><span>Digital passes issued</span><strong>{stats.withQr} / {stats.total}</strong></div>
+                    <div className="overview-progress-track"><span className="coverage-blue" style={{ width: `${overviewData.passPercent}%` }} /></div>
+                  </div>
+                  <div className="overview-progress-item">
+                    <div><span>Current event check-ins</span><strong>{activeEvent ? `${activeEventCheckIns} / ${stats.active}` : 'No active event'}</strong></div>
+                    <div className="overview-progress-track"><span className="coverage-pink" style={{ width: `${stats.active ? Math.min(100, Math.round((activeEventCheckIns / stats.active) * 100)) : 0}%` }} /></div>
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            <aside className="overview-side-column" aria-label="Recent community activity">
+              <section className="overview-panel overview-side-panel" aria-labelledby="recent-checkins-title">
+                <div className="overview-panel-heading">
+                  <div>
+                    <h2 id="recent-checkins-title">Recent check-ins</h2>
+                    <p>Latest event attendance</p>
+                  </div>
+                  <button type="button" className="overview-panel-icon-button" onClick={() => setTab('attendance')} aria-label="View attendance history">↗</button>
+                </div>
+                {overviewData.recentAttendance.length > 0 ? (
+                  <div className="overview-activity-list">
+                    {overviewData.recentAttendance.map((record) => (
+                      <article className="overview-activity-item" key={record.id}>
+                        <span className="overview-activity-avatar">{(record.member_name || 'M').split(/\s+/).map((part) => part[0]).slice(0, 2).join('').toUpperCase()}</span>
+                        <div>
+                          <strong>{record.member_name || 'Community member'}</strong>
+                          <small>{getAttendanceEventName(record.notes) || record.notes || 'Member check-in'}</small>
+                        </div>
+                        <time dateTime={record.scanned_at}>{record.scanned_at ? new Date(record.scanned_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : ''}</time>
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="overview-empty-state overview-activity-empty">No check-ins recorded yet.</div>
+                )}
+                <button type="button" className="overview-see-all" onClick={() => setTab('attendance')}>See attendance log <span aria-hidden="true">›</span></button>
+              </section>
+
+              <section className="overview-panel overview-side-panel" aria-labelledby="recent-contributions-title">
+                <div className="overview-panel-heading">
+                  <div>
+                    <h2 id="recent-contributions-title">Contributions</h2>
+                    <p>Recent member achievements</p>
+                  </div>
+                  <button type="button" className="overview-panel-icon-button" onClick={() => setTab('contributions')} aria-label="View contributions">↗</button>
+                </div>
+                {overviewData.recentContributions.length > 0 ? (
+                  <div className="overview-contribution-list">
+                    {overviewData.recentContributions.slice(0, 3).map((item) => (
+                      <article className="overview-contribution-item" key={item.id}>
+                        <span className="overview-contribution-mark"><IconAward size={15} /></span>
+                        <div>
+                          <strong>{item.title}</strong>
+                          <small>{item.member_name || members.find((member) => member.id === item.member_id)?.full_name || 'Community member'}</small>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="overview-empty-state overview-activity-empty">No contributions recorded yet.</div>
+                )}
+                <button type="button" className="overview-see-all" onClick={() => setTab('contributions')}>See all contributions <span aria-hidden="true">›</span></button>
+              </section>
+            </aside>
+          </section>
+        )}
 
         {/* TAB 1: MEMBERS DIRECTORY */}
         {tab === 'members' && (
@@ -801,7 +1297,7 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
             {/* VIEW MODE 1: DATA TABLE */}
             {!loading && filteredMembers.length > 0 && viewMode === 'table' && (
               <div className="table-responsive-container">
-                <table className="modern-table">
+                <table className="modern-table members-table">
                   <thead>
                     <tr>
                       <th>Member</th>
@@ -1091,10 +1587,130 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
           </section>
         )}
 
+        {tab === 'contributions' && (
+          <section aria-label="Community contributions" className="contributions-page">
+            <div className="controls-panel">
+              <div className="controls-top">
+                <div className="search-input-wrap flex-1">
+                  <IconSearch size={18} className="search-icon" />
+                  <input
+                    type="search"
+                    className="input-field search-input"
+                    placeholder="Search achievements or members…"
+                    value={contribSearch}
+                    onChange={(event) => setContribSearch(event.target.value)}
+                  />
+                </div>
+                <div className="action-buttons-group contribution-actions">
+                  <select
+                    className="input-field contribution-member-select"
+                    value={contribTargetId}
+                    onChange={(event) => setContribTargetId(event.target.value)}
+                    aria-label="Choose a member"
+                  >
+                    <option value="">Choose a member</option>
+                    {members.map((member) => <option key={member.id} value={member.id}>{member.full_name}</option>)}
+                  </select>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={!members.some((member) => member.id === contribTargetId)}
+                    onClick={() => setSelectedContributions(members.find((member) => member.id === contribTargetId))}
+                  >
+                    <IconAward size={16} />
+                    <span>Add contribution</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="results-meta-bar">
+              <span className="text-sm text-muted">Showing <strong>{filteredContributions.length}</strong> of <strong>{contributions.length}</strong> records</span>
+            </div>
+
+            {contribLoading && <div className="card loading-card"><IconRefresh size={28} className="spin text-primary mb-2" /><p className="text-muted">Loading contributions…</p></div>}
+
+            {!contribLoading && filteredContributions.length === 0 && (
+              <div className="empty-state-panel">
+                <IconAward size={46} className="text-muted opacity-40 mb-3" />
+                <h3>{contribSearch ? 'No matching contributions' : 'No contributions recorded yet'}</h3>
+                <p className="text-muted text-sm max-w-sm mb-4">Record workshops, projects, leadership, and other community achievements.</p>
+              </div>
+            )}
+
+            {!contribLoading && filteredContributions.length > 0 && (
+              <div className="contribution-record-list">
+                {filteredContributions.map((item) => (
+                  <article className="contribution-record" key={item.id}>
+                    <div className="contribution-record-icon"><IconAward size={19} /></div>
+                    <div className="contribution-record-main">
+                      <strong>{item.title}</strong>
+                      <span>{item.member_name || 'Member'}{item.created_at ? ` · ${new Date(item.created_at).toLocaleDateString()}` : ''}</span>
+                      {item.description && <p>{item.description}</p>}
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-sm contribution-manage-button"
+                      onClick={() => setSelectedContributions(members.find((member) => member.id === item.member_id) || { id: item.member_id, full_name: item.member_name || 'Member', role: 'Member' })}
+                    >
+                      Manage
+                    </button>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
         {/* TAB 2: ATTENDANCE TRACKER */}
         {tab === 'attendance' && (
           <section aria-label="Attendance Log">
-            <div className="controls-panel">
+            <div className={`event-manager-card ${activeEvent ? 'event-active' : ''}`}>
+              <div className="event-manager-copy">
+                <div className="event-manager-title-row">
+                  <span className={`event-status-dot ${activeEvent ? 'active' : ''}`} />
+                  <span className="event-status-label">{activeEvent ? 'ACTIVE EVENT' : 'EVENT SETUP'}</span>
+                </div>
+                <h2>{activeEvent?.name || 'Create an event to begin'}</h2>
+                {activeEvent ? (
+                  <p>{[activeEvent.date, activeEvent.location].filter(Boolean).join(' · ') || 'Ready for member check-ins'}</p>
+                ) : (
+                  <p>Attendance is recorded against an event when you scan a member’s QR pass.</p>
+                )}
+              </div>
+              <div className="event-manager-actions attendance-event-actions">
+                {activeEvent ? (
+                  <>
+                    <button type="button" className="btn btn-primary" onClick={() => setShowScanner(true)}><IconCamera size={16} /> Scan passes</button>
+                    <button type="button" className="btn btn-outline" onClick={handleEndEvent}>End event</button>
+                    <button type="button" className="btn btn-danger" onClick={() => setEventToDelete(activeEvent)}><IconTrash size={15} /> Delete event</button>
+                  </>
+                ) : (
+                  <button type="button" className="btn btn-primary" onClick={() => setShowEventForm(true)}><IconCalendar size={16} /> Create event</button>
+                )}
+              </div>
+            </div>
+
+            {events.filter((event) => !event.active).length > 0 && (
+              <details className="event-history-details">
+                <summary>Recent events on this device ({events.filter((event) => !event.active).length})</summary>
+                <div className="event-history-list">
+                  {events.filter((event) => !event.active).map((event) => (
+                    <div className="event-history-item" key={event.id}>
+                      <div className="event-history-copy">
+                        <span>{event.name}</span>
+                        <small>{[event.date, event.location].filter(Boolean).join(' · ') || 'Event ended'}</small>
+                      </div>
+                      <button type="button" className="btn-icon-danger event-delete-action" onClick={() => setEventToDelete(event)} aria-label={`Delete ${event.name} and its attendance records`} title="Delete event and check-ins">
+                        <IconTrash size={15} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+
+            <div className="controls-panel attendance-controls-panel">
               <div className="controls-top">
                 <div className="search-input-wrap flex-1">
                   <IconSearch size={18} className="search-icon" />
@@ -1116,14 +1732,15 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
                   )}
                 </div>
 
-                <div className="action-buttons-group">
+                <div className="action-buttons-group attendance-control-actions">
                   <button
                     type="button"
-                    className="btn btn-primary"
-                    onClick={() => setShowScanner(true)}
+                    className="btn btn-primary attendance-open-scanner-button"
+                    disabled={!activeEvent}
+                    onClick={() => activeEvent ? setShowScanner(true) : setShowEventForm(true)}
                   >
                     <IconCamera size={16} />
-                    <span>Open Scanner</span>
+                    <span>{activeEvent ? 'Open Scanner' : 'Create event first'}</span>
                   </button>
 
                   <button
@@ -1166,31 +1783,34 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
                 <IconCalendar size={48} className="text-muted opacity-40 mb-3" />
                 <h3>No attendance check-ins yet</h3>
                 <p className="text-muted text-sm max-w-sm mb-4">
-                  Scan a member's QR code at an event or meeting using the scanner to start
-                  logging attendance records.
+                  {activeEvent
+                    ? 'Scan a member’s QR pass to record the first check-in for this event.'
+                    : 'Create an event first, then scan member QR passes to post attendance.'}
                 </p>
                 <button
                   type="button"
                   className="btn btn-primary"
-                  onClick={() => setShowScanner(true)}
+                  onClick={() => activeEvent ? setShowScanner(true) : setShowEventForm(true)}
                 >
-                  <IconCamera size={16} />
-                  <span>Launch QR Scanner</span>
+                  {activeEvent ? <IconCamera size={16} /> : <IconCalendar size={16} />}
+                  <span>{activeEvent ? 'Launch QR Scanner' : 'Create event'}</span>
                 </button>
               </div>
             )}
 
             {!attLoading && filteredAttendance.length > 0 && (
               <div className="table-responsive-container">
-                <table className="modern-table">
+                <table className="modern-table attendance-table">
                   <thead>
                     <tr>
                       <th>#</th>
                       <th>Member Name</th>
+                      <th>Event</th>
                       <th>Role</th>
                       <th>Date</th>
                       <th>Time</th>
                       <th>Verification</th>
+                      <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1204,6 +1824,7 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
                           <td>
                             <strong>{a.member_name}</strong>
                           </td>
+                          <td>{getAttendanceEventName(a.notes) || a.notes || 'Member check-in'}</td>
                           <td>
                             <span className="role-badge">{a.member_role || 'Member'}</span>
                           </td>
@@ -1232,6 +1853,17 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
                               <IconCheckCircle size={12} /> Verified Pass
                             </span>
                           </td>
+                          <td className="attendance-delete-cell">
+                            <button
+                              type="button"
+                              className="btn-icon-danger attendance-delete-action"
+                              onClick={() => setAttendanceToDelete(a)}
+                              aria-label={`Delete attendance for ${a.member_name}`}
+                              title="Delete attendance record"
+                            >
+                              <IconTrash size={15} />
+                            </button>
+                          </td>
                         </tr>
                       )
                     })}
@@ -1242,6 +1874,103 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
           </section>
         )}
       </main>
+
+      {tab === 'attendance' && (
+        <div className="attendance-quick-bar" role="region" aria-label="Attendance capture">
+          <div className="attendance-quick-copy">
+            <span className="attendance-quick-indicator" />
+            <span className="attendance-quick-label">{activeEvent?.name || 'Attendance capture'}</span>
+            <small>{activeEvent ? `${activeEventCheckIns} recent check-ins` : 'Create an event to start checking in'}</small>
+          </div>
+          <button
+            type="button"
+            className="attendance-quick-action"
+            onClick={() => activeEvent ? setShowScanner(true) : setShowEventForm(true)}
+          >
+            {activeEvent ? <IconCamera size={16} /> : <IconCalendar size={16} />}
+            <span>{activeEvent ? 'Capture attendance' : 'Create event'}</span>
+          </button>
+        </div>
+      )}
+
+      {showEventForm && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="event-form-title" onClick={() => setShowEventForm(false)}>
+          <div className="modal-card event-form-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title-group">
+                <span className="modal-icon-badge"><IconCalendar size={18} /></span>
+                <div><h3 id="event-form-title" className="modal-title">Create an event</h3><p className="modal-subtitle">Start a check-in session for member QR passes.</p></div>
+              </div>
+              <button type="button" className="btn-icon" onClick={() => setShowEventForm(false)} aria-label="Close event form"><IconX size={18} /></button>
+            </div>
+            <form onSubmit={handleCreateEvent}>
+              <div className="modal-body form-grid">
+                <div className="form-group">
+                  <label htmlFor="event-name">Event name <span className="req">*</span></label>
+                  <input id="event-name" className="input-field" maxLength={120} autoFocus required placeholder="e.g. Cisco Networking Workshop" value={eventForm.name} onChange={(event) => setEventForm((current) => ({ ...current, name: event.target.value }))} />
+                </div>
+                <div className="form-row event-form-row">
+                  <div className="form-group flex-1">
+                    <label htmlFor="event-date">Date</label>
+                    <input id="event-date" type="date" className="input-field" value={eventForm.date} onChange={(event) => setEventForm((current) => ({ ...current, date: event.target.value }))} />
+                  </div>
+                  <div className="form-group flex-2">
+                    <label htmlFor="event-location">Location <span className="text-muted">(optional)</span></label>
+                    <input id="event-location" className="input-field" maxLength={120} placeholder="e.g. Lab 204" value={eventForm.location} onChange={(event) => setEventForm((current) => ({ ...current, location: event.target.value }))} />
+                  </div>
+                </div>
+                <p className="event-storage-note">Event setup is saved on this device. Check-ins are saved to the existing attendance records.</p>
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="btn btn-outline" onClick={() => setShowEventForm(false)}>Cancel</button>
+                <button type="submit" className="btn btn-primary"><IconCalendar size={16} /> Create event</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {eventToDelete && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="delete-event-title" onClick={() => { if (!deleteBusy) setEventToDelete(null) }}>
+          <div className="modal-card modal-sm" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title-group">
+                <span className="modal-icon-badge"><IconTrash size={18} /></span>
+                <div><h3 id="delete-event-title" className="modal-title">Delete event?</h3><p className="modal-subtitle">{eventToDelete.name}</p></div>
+              </div>
+              <button type="button" className="btn-icon" onClick={() => setEventToDelete(null)} aria-label="Close delete event dialog" disabled={deleteBusy}><IconX size={18} /></button>
+            </div>
+            <div className="modal-body">
+              <p className="text-sm">This removes the event from this device and permanently deletes all attendance check-ins recorded for it.</p>
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="btn btn-outline" onClick={() => setEventToDelete(null)} disabled={deleteBusy}>Cancel</button>
+              <button type="button" className="btn btn-danger" onClick={confirmDeleteEvent} disabled={deleteBusy}><IconTrash size={15} /> {deleteBusy ? 'Deleting…' : 'Delete event and check-ins'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {attendanceToDelete && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="delete-attendance-title" onClick={() => { if (!deleteBusy) setAttendanceToDelete(null) }}>
+          <div className="modal-card modal-sm" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title-group">
+                <span className="modal-icon-badge"><IconTrash size={18} /></span>
+                <div><h3 id="delete-attendance-title" className="modal-title">Delete attendance record?</h3><p className="modal-subtitle">{attendanceToDelete.member_name}</p></div>
+              </div>
+              <button type="button" className="btn-icon" onClick={() => setAttendanceToDelete(null)} aria-label="Close delete attendance dialog" disabled={deleteBusy}><IconX size={18} /></button>
+            </div>
+            <div className="modal-body">
+              <p className="text-sm">This permanently removes this check-in from the attendance history.</p>
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="btn btn-outline" onClick={() => setAttendanceToDelete(null)} disabled={deleteBusy}>Cancel</button>
+              <button type="button" className="btn btn-danger" onClick={confirmDeleteAttendance} disabled={deleteBusy}><IconTrash size={15} /> {deleteBusy ? 'Deleting…' : 'Delete record'}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* MODAL 1: Add or Edit Member */}
       <MemberModal
@@ -1293,7 +2022,16 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
       {selectedContributions && (
         <ContributionsModal
           member={selectedContributions}
-          onClose={() => setSelectedContributions(null)}
+          isDemo={useDemo}
+          demoContributions={contributions}
+          onDemoChange={(items) => setContributions(items.map((item) => ({
+            ...item,
+            member_name: members.find((member) => member.id === item.member_id)?.full_name || 'Member'
+          })))}
+          onClose={() => {
+            setSelectedContributions(null)
+            if (!useDemo) loadContributions()
+          }}
           notify={notify}
         />
       )}
@@ -1311,6 +2049,9 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
       {/* MODAL 5: QR Scanner */}
       {showScanner && (
         <QrScanner
+          activeEvent={activeEvent}
+          members={members}
+          isDemo={useDemo}
           onClose={() => setShowScanner(false)}
           onScan={(data) => {
             if (useDemo && data?.member_name) {
@@ -1320,7 +2061,7 @@ export default function Dashboard({ isDemo = false, onExitDemo, onOpenDbModal })
                   member_name: data.member_name,
                   member_role: data.member_role || 'Member',
                   scanned_at: new Date().toISOString(),
-                  notes: 'Live Camera Check-In'
+                  notes: createEventAttendanceNote(activeEvent)
                 },
                 ...prev
               ])

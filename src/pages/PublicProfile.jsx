@@ -2,9 +2,9 @@ import React, { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { supabase, configMissing } from '../lib/supabase'
 import { DEMO_MEMBERS, DEMO_CONTRIBUTIONS } from '../data/demoData'
+import { safeExternalUrl } from '../lib/safeUrl'
 import { useTheme } from '../components/ThemeContext'
 import {
-  IconLogo,
   IconShield,
   IconCheckCircle,
   IconAlertCircle,
@@ -54,14 +54,19 @@ export default function PublicProfile() {
       .catch(() => setStatus('notfound'))
   }, [token])
 
+  useEffect(() => {
+    if (status !== 'ok' || window.location.hash !== '#contributions') return
+    window.requestAnimationFrame(() => {
+      document.getElementById('contributions')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }, [status])
+
   return (
     <div className="public-profile-layout">
       {/* Mini top bar */}
       <header className="public-top-bar wrap">
         <div className="brand-group">
-          <div className="brand-logo">
-            <IconLogo size={22} />
-          </div>
+          <img className="public-brand-image" src="/logo.png" alt="Cisco Community VIT Bhopal" />
           <span className="brand-title">Cisco Member Verification</span>
         </div>
 
@@ -102,7 +107,7 @@ export default function PublicProfile() {
               has been deactivated by the club administration.
             </p>
             <Link to="/" className="btn btn-primary">
-              Return to Member Hub
+              Return to community
             </Link>
           </div>
         )}
@@ -152,7 +157,7 @@ export default function PublicProfile() {
               </div>
 
               {/* Verified Contributions */}
-              <div className="credential-contributions-section">
+              <div id="contributions" className="credential-contributions-section">
                 <div className="section-title-row">
                   <IconAward size={18} className="text-accent" />
                   <h3 className="section-title-sm">Recognized Achievements & Works</h3>
@@ -183,9 +188,9 @@ export default function PublicProfile() {
                             )}
                           </div>
                           {c.description && <p className="contrib-desc">{c.description}</p>}
-                          {c.link && /^https?:\/\//i.test(c.link) && (
+                          {safeExternalUrl(c.link) && (
                             <a
-                              href={c.link}
+                              href={safeExternalUrl(c.link)}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="contrib-link"

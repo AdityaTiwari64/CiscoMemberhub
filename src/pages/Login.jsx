@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { supabase } from '../lib/supabase'
-import { IconEye, IconEyeOff, IconAlertCircle, IconShield } from '../components/Icons'
+import { IconEye, IconEyeOff, IconAlertCircle, IconLock } from '../components/Icons'
 
 export default function Login() {
   const [email, setEmail] = useState('')
@@ -73,7 +73,7 @@ export default function Login() {
       </div>
 
       <button type="submit" className="btn btn-primary btn-block btn-lg" disabled={busy}>
-        {busy ? <span className="btn-spinner"></span> : <IconShield size={16} />}
+        {busy ? <span className="btn-spinner"></span> : <IconLock size={16} />}
         <span>{busy ? 'Authenticating…' : 'Sign In as Administrator'}</span>
       </button>
     </form>

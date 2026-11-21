@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback } from 'react'
+import React, { createContext, useContext, useState, useCallback, useMemo } from 'react'
 import { IconCheckCircle, IconAlertCircle, IconX } from './Icons'
 
 const ToastContext = createContext(null)
@@ -20,12 +20,12 @@ export function ToastProvider({ children }) {
     }
   }, [removeToast])
 
-  const notify = {
+  const notify = useMemo(() => ({
     success: (msg, dur) => toast(msg, 'success', dur),
     error: (msg, dur) => toast(msg, 'error', dur),
     info: (msg, dur) => toast(msg, 'info', dur),
     warn: (msg, dur) => toast(msg, 'warning', dur),
-  }
+  }), [toast])
 
   return (
     <ToastContext.Provider value={notify}>

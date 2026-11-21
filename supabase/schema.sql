@@ -28,9 +28,11 @@ create table public.contributions (
 
 -- helper: is the current user an admin?
 create or replace function public.is_admin() returns boolean
-language sql security definer stable set search_path = public as $$
+language sql security definer stable set search_path = '' as $$
   select exists (select 1 from public.admins where user_id = auth.uid());
 $$;
+revoke all on function public.is_admin() from public, anon;
+grant execute on function public.is_admin() to authenticated;
 
 alter table public.admins enable row level security;
 alter table public.members enable row level security;
@@ -43,11 +45,11 @@ create policy "admins manage contributions" on public.contributions for all usin
 
 -- Admin-only: generate a fresh random QR token for a member
 create or replace function public.assign_qr(p_member uuid) returns text
-language plpgsql security definer set search_path = public as $$
+language plpgsql security definer set search_path = '' as $$
 declare t text;
 begin
   if not public.is_admin() then raise exception 'not allowed'; end if;
-  t := encode(gen_random_bytes(16), 'hex');
+  t := pg_catalog.replace(pg_catalog.gen_random_uuid()::text, '-', '');
   update public.members set qr_token = t where id = p_member;
   return t;
 end $$;
@@ -56,7 +58,7 @@ grant execute on function public.assign_qr(uuid) to authenticated;
 
 -- Public: what a QR scan sees. Only safe fields, only for the exact token. No email.
 create or replace function public.get_member_by_token(p_token text) returns json
-language sql security definer stable set search_path = public as $$
+language sql security definer stable set search_path = '' as $$
   select json_build_object(
     'full_name', m.full_name, 'role', m.role, 'department', m.department, 'joined', m.created_at,
     'contributions', coalesce((
@@ -66,6 +68,7 @@ language sql security definer stable set search_path = public as $$
   from public.members m
   where m.qr_token = p_token and m.is_active;
 $$;
+revoke all on function public.get_member_by_token(text) from public, anon;
 grant execute on function public.get_member_by_token(text) to anon, authenticated;
 
 -- Private storage bucket for uploaded QR images, admin-only

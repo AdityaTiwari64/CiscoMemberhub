@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
+import { safeExternalUrl } from '../lib/safeUrl'
 import {
   IconX,
   IconAward,
@@ -9,7 +10,7 @@ import {
   IconClock
 } from './Icons'
 
-export default function ContributionsModal({ member, onClose, notify }) {
+export default function ContributionsModal({ member, onClose, notify, isDemo = false, demoContributions = [], onDemoChange }) {
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -17,6 +18,11 @@ export default function ContributionsModal({ member, onClose, notify }) {
 
   const loadContributions = useCallback(async () => {
     if (!member) return
+    if (isDemo) {
+      setItems(demoContributions.filter((item) => item.member_id === member.id))
+      setLoading(false)
+      return
+    }
     setLoading(true)
     const { data, error } = await supabase
       .from('contributions')
@@ -30,7 +36,7 @@ export default function ContributionsModal({ member, onClose, notify }) {
       setItems(data || [])
     }
     setLoading(false)
-  }, [member, notify])
+  }, [member, notify, isDemo, demoContributions])
 
   useEffect(() => {
     loadContributions()
@@ -49,8 +55,24 @@ export default function ContributionsModal({ member, onClose, notify }) {
     e.preventDefault()
     if (!form.title.trim()) return
 
-    if (form.link && !/^https?:\/\//i.test(form.link)) {
-      notify?.error?.('Link must start with http:// or https://')
+    if (form.link && !safeExternalUrl(form.link)) {
+      notify?.error?.('Enter a valid http:// or https:// link')
+      return
+    }
+
+    if (isDemo) {
+      const item = {
+        id: `demo-contribution-${Date.now()}`,
+        member_id: member.id,
+        title: form.title.trim(),
+        description: form.description.trim() || null,
+        link: form.link.trim() || null,
+        created_at: new Date().toISOString()
+      }
+      onDemoChange?.([...demoContributions, item])
+      setItems((current) => [item, ...current])
+      setForm({ title: '', description: '', link: '' })
+      notify?.success?.('Contribution recorded in demo')
       return
     }
 
@@ -74,6 +96,13 @@ export default function ContributionsModal({ member, onClose, notify }) {
 
   const handleDelete = async (id, title) => {
     if (!window.confirm(`Delete contribution "${title}"?`)) return
+    if (isDemo) {
+      const updated = demoContributions.filter((item) => item.id !== id)
+      onDemoChange?.(updated)
+      setItems(updated.filter((item) => item.member_id === member.id))
+      notify?.success?.('Contribution deleted from demo')
+      return
+    }
     const { error } = await supabase.from('contributions').delete().eq('id', id)
     if (error) {
       notify?.error?.(error.message)
@@ -187,6 +216,7 @@ export default function ContributionsModal({ member, onClose, notify }) {
 
             {!loading &&
               items.map((c) => {
+                const safeLink = safeExternalUrl(c.link)
                 const dateStr = new Date(c.created_at).toLocaleDateString('en-US', {
                   month: 'short',
                   day: 'numeric',
@@ -204,9 +234,9 @@ export default function ContributionsModal({ member, onClose, notify }) {
                       {c.description && (
                         <p className="contrib-desc">{c.description}</p>
                       )}
-                      {c.link && (
+                      {safeLink && (
                         <a
-                          href={c.link}
+                          href={safeLink}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="contrib-link"

@@ -1,9 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react'
+import QRCode from 'qrcode'
 import { supabase, configMissing } from '../lib/supabase'
 import { DEMO_MEMBERS, DEMO_ATTENDANCE, DEMO_CONTRIBUTIONS } from '../data/demoData'
 import Navbar from '../components/Navbar'
 import IdCard from '../components/IdCard'
 import { useToast } from '../components/Toast'
+import { getAttendanceEventName } from '../lib/attendance'
+import { safeExternalUrl } from '../lib/safeUrl'
 import {
   IconUsers,
   IconIdCard,
@@ -27,6 +30,7 @@ export default function MemberDashboard({ isDemo = false, onExitDemo, onOpenDbMo
   const [status, setStatus] = useState('loading') // loading | ok | unlinked | error
   const [tab, setTab] = useState('pass') // 'pass' | 'contributions' | 'attendance'
   const [showQuickPass, setShowQuickPass] = useState(false)
+  const [quickPassQr, setQuickPassQr] = useState('')
 
   const loadProfile = useCallback(async () => {
     setStatus('loading')
@@ -78,6 +82,25 @@ export default function MemberDashboard({ isDemo = false, onExitDemo, onOpenDbMo
   useEffect(() => {
     loadProfile()
   }, [loadProfile])
+
+  useEffect(() => {
+    if (!showQuickPass || !qrToken) {
+      setQuickPassQr('')
+      return
+    }
+    let current = true
+    QRCode.toDataURL(`${window.location.origin}/m/${qrToken}`, {
+      width: 420,
+      margin: 2,
+      color: { dark: '#111111', light: '#ffffff' }
+    }).then((url) => {
+      if (current) setQuickPassQr(url)
+    }).catch((error) => {
+      console.error('Quick pass QR generation failed:', error)
+      if (current) setQuickPassQr('')
+    })
+    return () => { current = false }
+  }, [showQuickPass, qrToken])
 
   if (status === 'loading') {
     return (
@@ -203,9 +226,21 @@ export default function MemberDashboard({ isDemo = false, onExitDemo, onOpenDbMo
         </div>
       )}
 
-      <Navbar role="member" userName={profile.full_name} />
+      <Navbar
+        role="member"
+        userName={profile.full_name}
+        activeTab={tab}
+        setActiveTab={setTab}
+      />
 
       <main className="wrap main-content">
+        <header className="page-heading member-page-heading">
+          <div>
+            <p className="page-eyebrow">CISCO COMMUNITY · VIT BHOPAL</p>
+            <h1>{tab === 'pass' ? 'My digital pass' : tab === 'contributions' ? 'My contributions' : 'Attendance history'}</h1>
+            <p>Your membership details, contributions, and event check-ins.</p>
+          </div>
+        </header>
         {/* Profile Hero Header */}
         <div className="member-hero-card">
           <div className="member-hero-info">
@@ -357,6 +392,7 @@ export default function MemberDashboard({ isDemo = false, onExitDemo, onOpenDbMo
             {contribs.length > 0 && (
               <div className="contributions-list">
                 {contribs.map((c, index) => {
+                  const safeLink = safeExternalUrl(c.link)
                   const dateStr = new Date(c.date || c.created_at).toLocaleDateString('en-US', {
                     month: 'short',
                     day: 'numeric',
@@ -372,9 +408,9 @@ export default function MemberDashboard({ isDemo = false, onExitDemo, onOpenDbMo
                           </span>
                         </div>
                         {c.description && <p className="contrib-desc">{c.description}</p>}
-                        {c.link && (
+                        {safeLink && (
                           <a
-                            href={c.link}
+                            href={safeLink}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="contrib-link"
@@ -416,10 +452,11 @@ export default function MemberDashboard({ isDemo = false, onExitDemo, onOpenDbMo
 
             {attendance.length > 0 && (
               <div className="table-responsive-container">
-                <table className="modern-table">
+                <table className="modern-table member-attendance-table">
                   <thead>
                     <tr>
                       <th>#</th>
+                      <th>Event</th>
                       <th>Date</th>
                       <th>Time</th>
                       <th>Status</th>
@@ -433,6 +470,7 @@ export default function MemberDashboard({ isDemo = false, onExitDemo, onOpenDbMo
                           <td className="text-muted font-mono text-sm">
                             {attendance.length - index}
                           </td>
+                          <td><strong>{getAttendanceEventName(a.notes) || a.notes || 'Member check-in'}</strong></td>
                           <td>
                             <span className="flex-center gap-1 font-medium">
                               <IconCalendar size={13} className="text-muted" />
@@ -495,13 +533,7 @@ export default function MemberDashboard({ isDemo = false, onExitDemo, onOpenDbMo
             </div>
 
             <div className="quick-pass-qr-wrap">
-              <img
-                src={`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(
-                  `${window.location.origin}/m/${qrToken}`
-                )}`}
-                alt="Member QR Pass"
-                className="quick-pass-qr-img"
-              />
+              {quickPassQr ? <img src={quickPassQr} alt="Member QR Pass" className="quick-pass-qr-img" /> : <span className="text-muted">Preparing QR pass…</span>}
             </div>
 
             <p className="quick-pass-hint">

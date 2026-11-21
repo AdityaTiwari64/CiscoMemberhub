@@ -45,6 +45,10 @@ export default function LinkUserModal({ member, isOpen, onClose, notify }) {
     e.preventDefault()
     const cleanId = userId.trim()
     if (!cleanId) return
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(cleanId)) {
+      notify?.error?.('Enter a valid Supabase Auth user UUID.')
+      return
+    }
 
     setBusy(true)
     const { error } = await supabase.rpc('link_member_user', {
@@ -54,7 +58,11 @@ export default function LinkUserModal({ member, isOpen, onClose, notify }) {
 
     setBusy(false)
     if (error) {
-      notify?.error?.(error.message)
+      if (error.code === '23503' && error.message?.includes('member_users_user_id_fkey')) {
+        notify?.error?.('No Auth user exists for this UUID. Invite or create the user under Authentication → Users first, then paste their Auth user ID.')
+      } else {
+        notify?.error?.(error.message)
+      }
     } else {
       notify?.success?.(`Linked ${member.full_name} to user account`)
       onClose()
@@ -98,7 +106,7 @@ export default function LinkUserModal({ member, isOpen, onClose, notify }) {
           <div className="info-box mb-3">
             <IconAlertCircle size={18} className="text-primary flex-shrink-0" />
             <div className="text-sm">
-              Copy the user's UUID from <strong>Supabase &gt; Authentication &gt; Users</strong> to allow them to log into the Member Dashboard.
+              Invite or create the user under <strong>Supabase &gt; Authentication &gt; Users</strong> first, then copy their Auth user UUID to enable the Member Dashboard.
             </div>
           </div>
 

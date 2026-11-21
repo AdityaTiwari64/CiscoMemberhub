@@ -44,7 +44,7 @@ create policy "member reads own attendance" on public.attendance
 
 -- ─── 6. record_attendance(token) — admin scans a QR, logs attendance ────
 create or replace function public.record_attendance(p_token text)
-returns json language plpgsql security definer set search_path = public as $$
+returns json language plpgsql security definer set search_path = '' as $$
 declare
   v_member  public.members%rowtype;
   v_att_id  uuid;
@@ -73,7 +73,7 @@ grant execute on function public.record_attendance(text) to authenticated;
 
 -- ─── 7. get_my_member_profile() — member fetches their own data ─────────
 create or replace function public.get_my_member_profile()
-returns json language plpgsql security definer stable set search_path = public as $$
+returns json language plpgsql security definer stable set search_path = '' as $$
 declare
   v_member_id uuid;
   v_result    json;
@@ -107,11 +107,12 @@ begin
 
   return v_result;
 end $$;
+revoke all on function public.get_my_member_profile() from public, anon;
 grant execute on function public.get_my_member_profile() to authenticated;
 
 -- ─── 8. link_member_user(member_id, user_id) — admin links a user ───────
 create or replace function public.link_member_user(p_member_id uuid, p_user_id uuid)
-returns void language plpgsql security definer set search_path = public as $$
+returns void language plpgsql security definer set search_path = '' as $$
 begin
   if not public.is_admin() then raise exception 'not allowed'; end if;
   insert into public.member_users (user_id, member_id)
@@ -123,14 +124,32 @@ grant execute on function public.link_member_user(uuid, uuid) to authenticated;
 
 -- ─── 9. get_attendance_log(days) — admin fetches recent attendance ───────
 create or replace function public.get_attendance_log(p_days int default 30)
-returns json language sql security definer stable set search_path = public as $$
+returns json
+language plpgsql
+security definer
+stable
+set search_path = ''
+as $$
+declare
+  v_days int := greatest(1, least(coalesce(p_days, 30), 365));
+  v_result json;
+begin
+  if not public.is_admin() then
+    raise exception 'not allowed';
+  end if;
+
   select coalesce(json_agg(row_to_json(t) order by t.scanned_at desc), '[]'::json)
+  into v_result
   from (
     select a.id, a.scanned_at, a.notes, m.full_name as member_name, m.role as member_role
     from public.attendance a
     join public.members m on m.id = a.member_id
-    where a.scanned_at >= now() - (p_days || ' days')::interval
+    where a.scanned_at >= now() - make_interval(days => v_days)
   ) t;
+  return v_result;
+end;
 $$;
 revoke all on function public.get_attendance_log(int) from public, anon;
 grant execute on function public.get_attendance_log(int) to authenticated;
+
+-- For the HR attendance-only portal, also run hr_attendance_access.sql.

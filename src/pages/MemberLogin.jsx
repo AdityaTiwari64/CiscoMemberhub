@@ -1,8 +1,9 @@
 import React, { useState } from 'react'
 import { supabase } from '../lib/supabase'
-import { IconEye, IconEyeOff, IconAlertCircle, IconUsers } from '../components/Icons'
+import { IconEye, IconEyeOff, IconAlertCircle, IconLock } from '../components/Icons'
 
-export default function MemberLogin() {
+export default function MemberLogin({ portal = 'member' }) {
+  const isHrPortal = portal === 'hr'
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
@@ -17,7 +18,7 @@ export default function MemberLogin() {
     if (error) {
       setError(
         error.message === 'Invalid login credentials'
-          ? 'Invalid member email or password'
+          ? `Invalid ${isHrPortal ? 'HR' : 'member'} email or password`
           : error.message
       )
     }
@@ -34,12 +35,12 @@ export default function MemberLogin() {
       )}
 
       <div className="form-group">
-        <label htmlFor="member-login-email">Member Email</label>
+        <label htmlFor="member-login-email">{isHrPortal ? 'HR email' : 'Member Email'}</label>
         <input
           id="member-login-email"
           type="email"
           className="input-field"
-          placeholder="member@ciscoclub.org"
+          placeholder={isHrPortal ? 'name@vitbhopal.ac.in' : 'member@ciscoclub.org'}
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           required
@@ -73,12 +74,14 @@ export default function MemberLogin() {
       </div>
 
       <button type="submit" className="btn btn-primary btn-block btn-lg" disabled={busy}>
-        {busy ? <span className="btn-spinner"></span> : <IconUsers size={16} />}
-        <span>{busy ? 'Verifying…' : 'Sign In to Member Portal'}</span>
+        {busy ? <span className="btn-spinner"></span> : <IconLock size={16} />}
+        <span>{busy ? 'Verifying…' : isHrPortal ? 'Sign In to HR Attendance' : 'Sign In to Member Portal'}</span>
       </button>
 
       <p className="auth-footer-help-text">
-        Need access? Contact your club lead to link your member profile.
+        {isHrPortal
+          ? 'HR access is invitation-only. Contact the administrator if you need an account.'
+          : 'Need access? Contact your club lead to link your member profile.'}
       </p>
     </form>
   )
