@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { supabase } from '../lib/supabase'
+import { supabase, configMissing } from '../lib/supabase'
 import { IconEye, IconEyeOff, IconAlertCircle, IconLock } from '../components/Icons'
 
 export default function MemberLogin({ portal = 'member' }) {
@@ -9,9 +9,14 @@ export default function MemberLogin({ portal = 'member' }) {
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const configurationError = 'Sign-in is unavailable because this deployment is not connected to its authentication service. Contact the site administrator.'
 
   async function submit(e) {
     e.preventDefault()
+    if (configMissing) {
+      setError(configurationError)
+      return
+    }
     setBusy(true)
     setError('')
     const { error } = await supabase.auth.signInWithPassword({ email, password })
@@ -27,10 +32,10 @@ export default function MemberLogin({ portal = 'member' }) {
 
   return (
     <form className="auth-form-clean" onSubmit={submit}>
-      {error && (
+      {(configMissing || error) && (
         <div className="auth-error-banner">
           <IconAlertCircle size={16} className="text-danger flex-shrink-0" />
-          <span>{error}</span>
+          <span>{configMissing ? configurationError : error}</span>
         </div>
       )}
 
@@ -43,6 +48,7 @@ export default function MemberLogin({ portal = 'member' }) {
           placeholder={isHrPortal ? 'Enter your invited HR email' : 'Enter your member email'}
           value={email}
           onChange={(e) => setEmail(e.target.value)}
+          disabled={configMissing}
           required
           autoComplete="email"
           autoFocus
@@ -59,6 +65,7 @@ export default function MemberLogin({ portal = 'member' }) {
             placeholder="••••••••••••"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
+            disabled={configMissing}
             required
             autoComplete="current-password"
           />
@@ -66,6 +73,7 @@ export default function MemberLogin({ portal = 'member' }) {
             type="button"
             className="password-toggle-btn"
             onClick={() => setShowPassword(!showPassword)}
+            disabled={configMissing}
             aria-label={showPassword ? 'Hide password' : 'Show password'}
           >
             {showPassword ? <IconEyeOff size={16} /> : <IconEye size={16} />}
@@ -73,7 +81,7 @@ export default function MemberLogin({ portal = 'member' }) {
         </div>
       </div>
 
-      <button type="submit" className="btn btn-primary btn-block btn-lg" disabled={busy}>
+      <button type="submit" className="btn btn-primary btn-block btn-lg" disabled={busy || configMissing}>
         {busy ? <span className="btn-spinner"></span> : <IconLock size={16} />}
         <span>{busy ? 'Verifying…' : isHrPortal ? 'Sign In to HR Attendance' : 'Sign In to Member Portal'}</span>
       </button>
